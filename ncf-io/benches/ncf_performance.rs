@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 const REALISTIC_LAYER_COUNT: usize = 16;
 const REALISTIC_TENSOR_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per tensor, ~512 MiB model
+const PARTIAL_LAYER_COUNT: usize = 32;
+const PARTIAL_TENSOR_BYTES: usize = 4 * 1024 * 1024; // 4 MiB per tensor for partial-load test
 
 struct SafeTensorView<'a> {
     dtype: SafeDtype,
@@ -160,6 +162,11 @@ fn build_sample_safetensors(path: &Path) {
     build_safetensors_from_payloads(path, &payloads);
 }
 
+fn build_sample_safetensors_with_layers(path: &Path, layer_count: usize, tensor_bytes: usize) {
+    let payloads = build_realistic_tensor_payload(layer_count, tensor_bytes);
+    build_safetensors_from_payloads(path, &payloads);
+}
+
 fn build_realistic_safetensors(path: &Path) {
     let payloads = build_realistic_tensor_payload(REALISTIC_LAYER_COUNT, REALISTIC_TENSOR_BYTES);
     build_safetensors_from_payloads(path, &payloads);
@@ -169,6 +176,8 @@ fn benchmark_ncf_reader_open(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_sample.ncf");
     build_sample_ncf(&sample_path);
 
+    // NCF open performs CBOR metadata/schema/index parsing, so this benchmark
+    // measures cold-start cost. NCF dirancang untuk pola `open once, access many`.
     c.bench_function("ncf_reader_open", |b| {
         b.iter(|| {
             let reader = NcfReader::open(&sample_path).expect("open sample ncf");
@@ -308,15 +317,34 @@ fn benchmark_ncf_parallel_chunk_load(c: &mut Criterion) {
     });
 }
 
-fn benchmark_ncf_selective_layer_load(c: &mut Criterion) {
-    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_selective.ncf");
-    build_sample_ncf_with_layers(&sample_path, 32, 4 * 1024 * 1024);
+fn benchmark_ncf_partial_layer_load(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_partial.ncf");
+    build_sample_ncf_with_layers(&sample_path, PARTIAL_LAYER_COUNT, PARTIAL_TENSOR_BYTES);
     let mmap = NcfMmap::open(&sample_path).expect("open sample ncf mmap");
 
-    c.bench_function("ncf_selective_layer_load", |b| {
+    // This benchmark measures partial load of a single tensor from a large model
+    // without accessing earlier tensor layers.
+    c.bench_function("ncf_partial_layer_load", |b| {
         b.iter(|| {
             let slice = mmap.tensor_slice("layer_015").expect("layer_015 slice missing");
             black_box(slice.len());
+        })
+    });
+}
+
+fn benchmark_safetensors_partial_layer_access(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("safetensors_benchmark_partial.safetensors");
+    build_sample_safetensors_with_layers(&sample_path, PARTIAL_LAYER_COUNT, PARTIAL_TENSOR_BYTES);
+    let bytes = fs::read(&sample_path).expect("read safetensors sample");
+
+    c.bench_function("safetensors_partial_layer_access", |b| {
+        b.iter(|| {
+            let tensors = SafeTensors::deserialize(black_box(&bytes)).expect("deserialize safetensors");
+            let layer = tensors
+                .iter()
+                .find(|(name, _)| *name == "layer_015")
+                .expect("layer_015 missing");
+            black_box(layer.1.data_len());
         })
     });
 }
@@ -347,7 +375,8 @@ criterion_group!(
     benchmark_ncf_realistic_load,
     benchmark_safetensors_realistic_load,
     benchmark_ncf_parallel_chunk_load,
-    benchmark_ncf_selective_layer_load,
+    benchmark_ncf_partial_layer_load,
+    benchmark_safetensors_partial_layer_access,
     benchmark_ncf_streaming_chunk_verify,
 );
 criterion_main!(benches);

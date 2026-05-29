@@ -1,0 +1,51 @@
+ Downloading crates ...
+  Downloaded arbitrary v1.4.2
+  Downloaded jobserver v0.1.34
+  Downloaded libfuzzer-sys v0.4.12
+   Compiling libc v0.2.186
+   Compiling bitflags v2.11.1
+   Compiling jobserver v0.1.34
+   Compiling getrandom v0.2.17
+   Compiling cc v1.2.63
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling blake3 v1.8.5
+   Compiling half v1.8.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_cbor v0.11.2
+   Compiling rand_chacha v0.3.1
+   Compiling ncf-core v0.1.0 (/workspaces/cnf/ncf-core)
+   Compiling self_cell v1.2.2
+   Compiling fastrand v2.4.1
+   Compiling tempfile v3.27.0
+   Compiling ncf-io v0.1.0 (/workspaces/cnf/ncf-io)
+   Compiling rand v0.8.6
+    Finished `release` profile [optimized] target(s) in 38.37s
+     Running benches/ncf_performance.rs (target/release/deps/ncf_performance-5976b67b7d41aa56)
+Gnuplot not found, using plotters backend
+test ncf_reader_open ... bench:       34558 ns/iter (+/- 6282)
+
+test ncf_reader_open_realistic ... bench:       56263 ns/iter (+/- 9817)
+
+test ncf_mmap_tensor_slice ... bench:           9 ns/iter (+/- 2)
+
+test ncf_reader_tensor_slice ... bench:          26 ns/iter (+/- 3)
+
+test ncf_sequential_layer_access ... bench:        1386 ns/iter (+/- 295)
+
+test safetensors_sequential_layer_access ... bench:       14679 ns/iter (+/- 2350)
+
+test safetensors_load_equivalent ... bench:        3323 ns/iter (+/- 529)
+
+test ncf_realistic_load ... bench:       55587 ns/iter (+/- 11901)
+
+test safetensors_realistic_load ... bench:       14960 ns/iter (+/- 1979)
+
+test ncf_parallel_chunk_load ... bench:       13420 ns/iter (+/- 3476)
+
+test ncf_selective_layer_load ... bench:          30 ns/iter (+/- 4)
+
+test ncf_streaming_chunk_verify ... bench:     1193591 ns/iter (+/- 325587)
+

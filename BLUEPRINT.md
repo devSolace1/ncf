@@ -65,6 +65,9 @@
 
 Ditulis dalam **CBOR** (bukan JSON biasa) agar compact dan bisa di-parse tanpa alokasi string besar.
 
+> CBOR parsing menambah biaya open file awal, karena NCF membaca dan memvalidasi header, skema, dan indeks.
+> Ini trade-off yang sah untuk fitur richer metadata, extensibility, dan zero-copy access di jalur baca berikutnya.
+
 ```rust
 struct NcfHeader {
     magic: [u8; 8],          // b"NCF\x00\xDE\xAD\xBE\xEF"
