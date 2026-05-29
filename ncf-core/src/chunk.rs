@@ -1,14 +1,21 @@
+/// Magic bytes that identify a chunk header.
 pub const CHUNK_MAGIC: &[u8; 4] = b"NCFK";
 
 #[derive(Debug, Clone, Copy)]
+/// Header metadata for a single chunk stored in an NCF file.
 pub struct ChunkHeader {
+    /// Monotonic chunk identifier.
     pub chunk_id: u64,
+    /// Flags describing chunk properties (e.g. compression).
     pub flags: u16,
+    /// Length of the uncompressed payload in bytes.
     pub uncompressed_len: u64,
+    /// Length of the stored payload (may equal uncompressed_len if not compressed).
     pub compressed_len: u64,
 }
 
 impl ChunkHeader {
+    /// Encode the chunk header into its binary wire format.
     pub fn encode(&self) -> [u8; 30] {
         let mut bytes = [0u8; 30];
         bytes[..4].copy_from_slice(CHUNK_MAGIC);
@@ -19,6 +26,7 @@ impl ChunkHeader {
         bytes
     }
 
+    /// Decode a chunk header from the given byte slice.
     pub fn decode(bytes: &[u8]) -> std::io::Result<Self> {
         if bytes.len() < 30 {
             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Chunk header too short"));

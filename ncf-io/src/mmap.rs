@@ -9,16 +9,22 @@ use std::io::{Cursor, ErrorKind};
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// Memory-mapped view of an NCF file for zero-copy reads.
 pub struct NcfMmap {
+    /// Underlying memory map of the file.
     pub mmap: Mmap,
+    /// Parsed file header prefix.
     pub header_prefix: FileHeaderPrefix,
+    /// Decoded CBOR header metadata.
     pub metadata: ncf_core::header::NcfHeader,
     schemas: OnceLock<std::result::Result<Vec<TensorSchema>, String>>,
     schema_range: std::ops::Range<usize>,
+    /// Parsed index information.
     pub index: NcfIndex,
 }
 
 impl NcfMmap {
+    /// Open and memory-map the given file path as an NCF file.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
@@ -107,6 +113,7 @@ impl NcfMmap {
         })
     }
 
+    /// Lazily decode and return the list of tensor schemas.
     pub fn schemas(&self) -> Result<&[TensorSchema]> {
         let schemas = self.schemas.get_or_init(|| {
             let slice = &self.mmap[self.schema_range.clone()];
@@ -119,6 +126,7 @@ impl NcfMmap {
         }
     }
 
+    /// Return a zero-copy slice of the tensor payload for the given name.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.index.tensor_map.get(name)?;
         let entry = self.index.entries.iter().find(|entry| &entry.chunk_id == chunk_id)?;

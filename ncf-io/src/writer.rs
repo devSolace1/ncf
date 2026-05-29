@@ -9,13 +9,18 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+/// Writer helper to construct and write NCF files.
 pub struct NcfWriter {
+    /// Header metadata to embed in the file.
     pub metadata: NcfHeader,
+    /// File-level flags.
     pub flags: NcfFlags,
+    /// Tensors to be written (schema + payload bytes).
     pub tensors: Vec<(TensorSchema, Vec<u8>)>,
 }
 
 impl NcfWriter {
+    /// Create a new `NcfWriter` with given metadata and flags.
     pub fn new(metadata: NcfHeader, flags: NcfFlags) -> Self {
         Self {
             metadata,
@@ -24,10 +29,12 @@ impl NcfWriter {
         }
     }
 
+    /// Add a tensor schema and its payload to be written.
     pub fn add_tensor(&mut self, schema: TensorSchema, payload: Vec<u8>) {
         self.tensors.push((schema, payload));
     }
 
+    /// Finalize and write the NCF file to the specified path.
     pub fn finalize<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let header_bytes = self.metadata.encode_cbor()?;
         let header_len = header_bytes.len() as u64;
@@ -93,6 +100,11 @@ impl NcfWriter {
             index_entries.clear();
             tensor_map.clear();
             chunk_id = 0;
+            // Clear all schema chunk lists once before the second pass so
+            // tensors that span multiple chunks retain all their chunk refs.
+            for s in schemas.iter_mut() {
+                s.chunks.clear();
+            }
             for (tensor, payload) in &self.tensors {
                 let raw = payload.clone();
                 let checksum = blake3::hash(&raw);
@@ -114,7 +126,6 @@ impl NcfWriter {
                     checksum: *checksum.as_bytes(),
                 };
                 if let Some(schema) = schemas.iter_mut().find(|schema| schema.name == tensor.name) {
-                    schema.chunks.clear();
                     schema.chunks.push(chunk_ref.clone());
                 }
                 index_entries.push(IndexEntry {

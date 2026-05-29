@@ -30,7 +30,7 @@ fn gguf_type_to_dtype(tensor_type: gguf::GGMLType) -> DType {
     }
 }
 
-pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P) -> anyhow::Result<()> {
+pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Option<&str>, author: Option<&str>) -> anyhow::Result<()> {
     let mut file = File::open(&input).with_context(|| format!("opening GGUF file {}", input.as_ref().display()))?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
@@ -38,13 +38,14 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("failed to parse GGUF file: {}", err))?
         .context("failed to parse GGUF file")?;
 
+    let arch = architecture.map(|s| s.to_string()).unwrap_or_else(|| "gguf-converted".to_string());
     let mut writer = NcfWriter::new(
         NcfHeader {
             metadata: Metadata {
                 model_name: input.as_ref().file_name().unwrap_or_default().to_string_lossy().into_owned(),
-                architecture: "gguf-converted".to_string(),
+                architecture: arch,
                 created_at: chrono::Utc::now().timestamp() as u64,
-                author: None,
+                author: author.map(|s| s.to_string()),
                 license: None,
                 quantization: None,
                 custom: BTreeMap::new(),
@@ -65,6 +66,36 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P) -> anyhow::Result<()> {
         let payload = data[start..end].to_vec();
         let dtype = gguf_type_to_dtype(tensor.tensor_type);
         let shape = tensor.dimensions.iter().copied().collect();
+        // Validate payload size for known element sizes
+        let elem_size_opt: Option<u64> = match dtype {
+            DType::F64 => Some(8),
+            DType::F32 => Some(4),
+            DType::F16 => Some(2),
+            DType::BF16 => Some(2),
+            DType::I32 => Some(4),
+            DType::I16 => Some(2),
+            DType::I8 => Some(1),
+            DType::U8 => Some(1),
+            // Quantized/custom formats may have packed representations; skip strict validation
+            DType::Q4K | DType::Q4_0 | DType::Q8_0 | DType::Custom(_) => None,
+        };
+        if let Some(elem_size) = elem_size_opt {
+            let mut elems: u64 = 1;
+            for &d in &tensor.dimensions {
+                elems = elems.saturating_mul(d);
+            }
+            let expected_bytes = elems.saturating_mul(elem_size) as usize;
+            if expected_bytes != payload.len() {
+                return Err(anyhow::anyhow!(
+                    "payload size mismatch for tensor '{}': expected {} bytes ({} elements * {} bytes), got {} bytes",
+                    tensor.name,
+                    expected_bytes,
+                    elems,
+                    elem_size,
+                    payload.len()
+                ));
+            }
+        }
         let schema = TensorSchema {
             name: tensor.name.clone(),
             dtype,

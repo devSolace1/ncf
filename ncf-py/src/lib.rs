@@ -51,9 +51,20 @@ fn create_ncf(input: &str, output: &str, name: Option<String>) -> PyResult<()> {
     Ok(())
 }
 
+#[pyfunction]
+fn load_tensor(path: &str, name: &str) -> PyResult<Option<Vec<u8>>> {
+    let reader = ncf_io::NcfReader::open(path).map_err(|err| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string()))?;
+    match reader.read_tensor(name) {
+        Ok(Some(data)) => Ok(Some(data)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())),
+    }
+}
+
 #[pymodule]
 fn ncf_py(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(inspect_ncf, m)?)?;
     m.add_function(wrap_pyfunction!(create_ncf, m)?)?;
+    m.add_function(wrap_pyfunction!(load_tensor, m)?)?;
     Ok(())
 }

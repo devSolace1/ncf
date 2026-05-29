@@ -1,6 +1,13 @@
+//! Core types and utilities for the NCF file format.
+#![deny(missing_docs)]
+
+/// Chunk-level structures and helpers.
 pub mod chunk;
+/// Header encoding/decoding utilities and types.
 pub mod header;
+/// Index block representation and helpers.
 pub mod index;
+/// Tensor schemas and related enums.
 pub mod schema;
 
 pub use chunk::*;
@@ -28,4 +35,5 @@ pub mod constants {
     pub const CHUNK_OVERHEAD: u64 = CHUNK_HEADER_SIZE + CHUNK_CHECKSUM_SIZE;
 }
 
+/// Common result type returned by NCF core APIs.
 pub type Result<T> = std::result::Result<T, NcfError>;

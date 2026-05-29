@@ -3,21 +3,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Single entry in the index describing a chunk's location.
 pub struct IndexEntry {
+    /// Chunk identifier.
     pub chunk_id: u64,
+    /// Byte offset of the chunk header within the file.
     pub byte_offset: u64,
+    /// Total byte length of the chunk (header + payload + checksum).
     pub byte_len: u64,
+    /// Hash of the tensor name for quick lookup.
     pub tensor_name_hash: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// In-memory representation of the NCF index block.
 pub struct NcfIndex {
+    /// Number of entries in the index.
     pub entry_count: u64,
+    /// Index entries for stored chunks.
     pub entries: Vec<IndexEntry>,
+    /// Mapping from tensor name to primary chunk id.
     pub tensor_map: BTreeMap<String, u64>,
 }
 
 impl NcfIndex {
+    /// Construct an index from entries and a tensor map.
     pub fn new(entries: Vec<IndexEntry>, tensor_map: BTreeMap<String, u64>) -> Self {
         let entry_count = entries.len() as u64;
         Self {
@@ -27,10 +37,12 @@ impl NcfIndex {
         }
     }
 
+    /// Find the primary chunk id for a given tensor name.
     pub fn find_chunk_id(&self, name: &str) -> Option<u64> {
         self.tensor_map.get(name).copied()
     }
 
+    /// Build a minimal index from a list of tensor schemas (first chunk per tensor).
     pub fn build_from_schemas(schemas: &[TensorSchema]) -> Self {
         let mut entries = Vec::new();
         let mut tensor_map = BTreeMap::new();

@@ -37,12 +37,20 @@ enum Commands {
         input: PathBuf,
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
+        #[arg(long)]
+        architecture: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
     },
     ConvertGguf {
         #[arg(value_name = "INPUT")]
         input: PathBuf,
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
+        #[arg(long)]
+        architecture: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
     },
 }
 
@@ -91,12 +99,12 @@ fn main() -> anyhow::Result<()> {
             writer.finalize(output)?;
             println!("Created NCF file from {}", input.display());
         }
-        Commands::ConvertSafetensors { input, output } => {
-            safetensors_to_ncf(input, output)?;
+        Commands::ConvertSafetensors { input, output, architecture, author } => {
+            safetensors_to_ncf(input, output, architecture.as_deref(), author.as_deref())?;
             println!("Converted safetensors to NCF.");
         }
-        Commands::ConvertGguf { input, output } => {
-            gguf_to_ncf(input, output)?;
+        Commands::ConvertGguf { input, output, architecture, author } => {
+            gguf_to_ncf(input, output, architecture.as_deref(), author.as_deref())?;
             println!("Converted GGUF to NCF.");
         }
     }

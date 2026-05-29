@@ -15,9 +15,13 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 #[derive(Debug)]
+/// Borrowed view of an NCF index decoded from the file.
 pub struct BorrowedNcfIndex<'a> {
+    /// Number of entries in the index.
     pub entry_count: u64,
+    /// Index entries.
     pub entries: Vec<IndexEntry>,
+    /// Mapping from tensor name to chunk id (borrowed str keys).
     pub tensor_map: HashMap<&'a str, u64>,
 }
 
@@ -30,6 +34,7 @@ struct RawBorrowedNcfIndex<'a> {
 }
 
 self_cell! {
+    /// Reader that owns a memory map and exposes borrowed dependent data.
     pub struct NcfReader {
         owner: Mmap,
         #[covariant]
@@ -38,15 +43,22 @@ self_cell! {
 }
 
 #[derive(Debug)]
+/// Owned dependent data stored alongside the memory map.
 pub struct NcfReaderData<'this> {
+    /// Parsed header metadata.
     pub metadata: NcfHeader,
+    /// Lazily-initialized schema list.
     pub schemas: OnceCell<std::result::Result<Vec<TensorSchema>, String>>,
+    /// Byte range of the schema block within the file.
     pub schema_range: std::ops::Range<usize>,
+    /// Borrowed index data referencing the mapped memory.
     pub index: BorrowedNcfIndex<'this>,
+    /// Parsed file header prefix.
     pub header_prefix: FileHeaderPrefix,
 }
 
 impl NcfReader {
+    /// Open an NCF file and return a reader providing borrowed access.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
@@ -144,6 +156,7 @@ impl NcfReader {
         Ok(reader)
     }
 
+    /// Print basic info about the NCF file to stdout (for debugging).
     pub fn inspect(&self) -> Result<()> {
         let schemas = self.schemas()?;
         println!("Model: {}", self.borrow_dependent().metadata.metadata.model_name);
@@ -155,18 +168,22 @@ impl NcfReader {
         Ok(())
     }
 
+    /// Find a tensor schema by name.
     pub fn find_schema(&self, name: &str) -> Result<Option<&TensorSchema>> {
         Ok(self.schemas()?.iter().find(|schema| schema.name == name))
     }
 
+    /// Return the decoded NCF header metadata.
     pub fn metadata(&self) -> &NcfHeader {
         &self.borrow_dependent().metadata
     }
 
+    /// Return the number of schemas/tensors in the file.
     pub fn schema_count(&self) -> Result<usize> {
         Ok(self.borrow_dependent().index.tensor_map.len())
     }
 
+    /// Return a zero-copy slice for a tensor payload by name, if present.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.borrow_dependent().index.tensor_map.get(name)?;
         let entry = self.borrow_dependent().index.entries.iter().find(|entry| &entry.chunk_id == chunk_id)?;
@@ -193,10 +210,12 @@ impl NcfReader {
         Some(&data[offset_start..offset_end])
     }
 
+    /// Return the parsed file header prefix.
     pub fn header_prefix(&self) -> FileHeaderPrefix {
         self.borrow_dependent().header_prefix
     }
 
+    /// Lazily decode and return the tensor schemas.
     pub fn schemas(&self) -> Result<&[TensorSchema]> {
         self.with_dependent(|owner, data| {
             let schemas_cell = data.schemas.get_or_init(|| {
@@ -212,6 +231,7 @@ impl NcfReader {
         })
     }
 
+    /// Read and return the full tensor payload bytes for the given name.
     pub fn read_tensor(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let schema = match self.find_schema(name)? {
             Some(schema) => schema,
