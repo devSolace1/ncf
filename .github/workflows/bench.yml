@@ -35,14 +35,27 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run benchmark suite
-        run: cargo bench --bench ncf_performance
+        run: |
+          cargo bench --bench ncf_performance -- --noplot --quiet | tee benchmark-output.txt
+
+      - name: Cache benchmark data
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: ${{ runner.os }}-ncf-benchmark
+          restore-keys: |
+            ${{ runner.os }}-ncf-benchmark
 
       - name: Compare benchmark results and report regression
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          benchmark-command: cargo bench --bench ncf_performance
-          baseline-command: cargo bench --bench ncf_performance
-          fail-on-alert: true
-          alert: "10%"
-          comment: true
+          name: 'NCF Performance'
+          tool: 'cargo'
+          output-file-path: benchmark-output.txt
+          external-data-json-path: .cache/benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-on-alert: true
+          summary-always: true
+          fail-on-alert: true
+          alert-threshold: '110%'
+          fail-threshold: '110%'
