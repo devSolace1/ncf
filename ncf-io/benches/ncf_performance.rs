@@ -139,7 +139,7 @@ fn benchmark_ncf_reader_open(c: &mut Criterion) {
     c.bench_function("ncf_reader_open", |b| {
         b.iter(|| {
             let reader = NcfReader::open(&sample_path).expect("open sample ncf");
-            black_box(reader.metadata.metadata.model_name.clone());
+            black_box(&reader.metadata.metadata.model_name);
         })
     });
 }
