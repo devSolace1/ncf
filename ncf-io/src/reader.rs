@@ -164,7 +164,7 @@ impl NcfReader {
     }
 
     pub fn schema_count(&self) -> Result<usize> {
-        Ok(self.schemas()?.len())
+        Ok(self.borrow_dependent().index.tensor_map.len())
     }
 
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
