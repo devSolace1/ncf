@@ -276,7 +276,8 @@ fn benchmark_ncf_realistic_load(c: &mut Criterion) {
     c.bench_function("ncf_realistic_load", |b| {
         b.iter(|| {
             let reader = NcfReader::open(&sample_path).expect("open realistic ncf");
-            black_box(reader.schemas().iter().count());
+            let schemas = reader.schemas().expect("read schemas");
+            black_box(schemas.iter().count());
         })
     });
 }

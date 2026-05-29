@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Inspect { file } => {
             let reader = ncf_io::NcfReader::open(file)?;
-            reader.inspect();
+            reader.inspect()?;
         }
         Commands::Info { file } => {
             let reader = ncf_io::NcfReader::open(file)?;

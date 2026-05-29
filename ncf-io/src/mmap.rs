@@ -5,14 +5,16 @@ use ncf_core::schema::TensorSchema;
 use ncf_core::constants::*;
 use ncf_core::Result;
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{Cursor, ErrorKind};
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub struct NcfMmap {
     pub mmap: Mmap,
     pub header_prefix: FileHeaderPrefix,
     pub metadata: ncf_core::header::NcfHeader,
-    pub schemas: Vec<TensorSchema>,
+    schemas: OnceLock<std::result::Result<Vec<TensorSchema>, String>>,
+    schema_range: std::ops::Range<usize>,
     pub index: NcfIndex,
 }
 
@@ -55,10 +57,7 @@ impl NcfMmap {
                     schema_start, schema_end, mmap.len())
             ).into());
         }
-        
-        let schemas: Vec<TensorSchema> = ciborium::de::from_reader(
-            std::io::Cursor::new(&mmap[schema_start..schema_end])
-        )?;
+        let schema_range = schema_start..schema_end;
 
         // Bounds check: footer
         const FOOTER_SIZE: usize = 16; // 8 bytes magic + 8 bytes length
@@ -95,16 +94,29 @@ impl NcfMmap {
         }
 
         let index: NcfIndex = ciborium::de::from_reader(
-            std::io::Cursor::new(&mmap[index_start..index_end])
+            Cursor::new(&mmap[index_start..index_end])
         )?;
         
         Ok(Self {
             mmap,
             header_prefix,
             metadata,
-            schemas,
+            schemas: OnceLock::new(),
+            schema_range,
             index,
         })
+    }
+
+    pub fn schemas(&self) -> Result<&[TensorSchema]> {
+        let schemas = self.schemas.get_or_init(|| {
+            let slice = &self.mmap[self.schema_range.clone()];
+            ciborium::de::from_reader(Cursor::new(slice)).map_err(|err| err.to_string())
+        });
+
+        match schemas.as_ref() {
+            Ok(schemas) => Ok(schemas.as_slice()),
+            Err(err) => Err(ncf_core::NcfError::Header(err.clone())),
+        }
     }
 
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {

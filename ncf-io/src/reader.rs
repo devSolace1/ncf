@@ -1,9 +1,10 @@
 use memmap2::Mmap;
 use ncf_core::header::{FileHeaderPrefix, NcfHeader};
 use ncf_core::index::IndexEntry;
-use ncf_core::schema::ChunkRef;
+use ncf_core::schema::TensorSchema;
 use ncf_core::constants::*;
 use ncf_core::Result;
+use once_cell::sync::OnceCell;
 use self_cell::self_cell;
 use serde::Deserialize;
 use serde_cbor::de::Deserializer as CborDeserializer;
@@ -12,18 +13,6 @@ use std::convert::TryInto;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::Path;
-
-#[derive(Debug, Deserialize)]
-pub struct BorrowedTensorSchema<'a> {
-    #[serde(borrow)]
-    pub name: &'a str,
-    pub dtype: ncf_core::schema::DType,
-    pub shape: Vec<u64>,
-    pub column_layout: ncf_core::schema::Layout,
-    pub compression: ncf_core::schema::Compression,
-    pub encoding: ncf_core::schema::Encoding,
-    pub chunks: Vec<ChunkRef>,
-}
 
 #[derive(Debug)]
 pub struct BorrowedNcfIndex<'a> {
@@ -51,7 +40,8 @@ self_cell! {
 #[derive(Debug)]
 pub struct NcfReaderData<'this> {
     pub metadata: NcfHeader,
-    pub schemas: Vec<BorrowedTensorSchema<'this>>,
+    pub schemas: OnceCell<std::result::Result<Vec<TensorSchema>, String>>,
+    pub schema_range: std::ops::Range<usize>,
     pub index: BorrowedNcfIndex<'this>,
     pub header_prefix: FileHeaderPrefix,
 }
@@ -94,10 +84,7 @@ impl NcfReader {
                         schema_start, schema_end, mmap.len())
                 ));
             }
-            
-            let mut schema_de = CborDeserializer::from_slice(&mmap[schema_start..schema_end]);
-            let schemas: Vec<BorrowedTensorSchema<'_>> = Deserialize::deserialize(&mut schema_de)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            let schema_range = schema_start..schema_end;
 
             const FOOTER_SIZE: usize = 16; // 8 bytes magic + 8 bytes length
             if mmap.len() < FOOTER_SIZE {
@@ -147,7 +134,8 @@ impl NcfReader {
 
             Ok(NcfReaderData {
                 metadata,
-                schemas,
+                schemas: OnceCell::new(),
+                schema_range,
                 index,
                 header_prefix,
             })
@@ -156,27 +144,27 @@ impl NcfReader {
         Ok(reader)
     }
 
-    pub fn inspect(&self) {
-        self.with_dependent(|_owner, data| {
-            println!("Model: {}", data.metadata.metadata.model_name);
-            println!("Architecture: {}", data.metadata.metadata.architecture);
-            println!("Tensors: {}", data.schemas.len());
-            for tensor in data.schemas.iter() {
-                println!(" - {} {} {:?}", tensor.name, tensor.dtype, tensor.shape);
-            }
-        })
+    pub fn inspect(&self) -> Result<()> {
+        let schemas = self.schemas()?;
+        println!("Model: {}", self.borrow_dependent().metadata.metadata.model_name);
+        println!("Architecture: {}", self.borrow_dependent().metadata.metadata.architecture);
+        println!("Tensors: {}", schemas.len());
+        for tensor in schemas.iter() {
+            println!(" - {} {} {:?}", tensor.name, tensor.dtype, tensor.shape);
+        }
+        Ok(())
     }
 
-    pub fn find_schema(&self, name: &str) -> Option<&BorrowedTensorSchema<'_>> {
-        self.borrow_dependent().schemas.iter().find(|schema| schema.name == name)
+    pub fn find_schema(&self, name: &str) -> Result<Option<&TensorSchema>> {
+        Ok(self.schemas()?.iter().find(|schema| schema.name == name))
     }
 
     pub fn metadata(&self) -> &NcfHeader {
         &self.borrow_dependent().metadata
     }
 
-    pub fn schema_count(&self) -> usize {
-        self.borrow_dependent().schemas.len()
+    pub fn schema_count(&self) -> Result<usize> {
+        Ok(self.schemas()?.len())
     }
 
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
@@ -209,12 +197,23 @@ impl NcfReader {
         self.borrow_dependent().header_prefix
     }
 
-    pub fn schemas(&self) -> &[BorrowedTensorSchema<'_>] {
-        &self.borrow_dependent().schemas
+    pub fn schemas(&self) -> Result<&[TensorSchema]> {
+        self.with_dependent(|owner, data| {
+            let schemas_cell = data.schemas.get_or_init(|| {
+                let schema_bytes = &owner[data.schema_range.clone()];
+                let mut schema_de = CborDeserializer::from_slice(schema_bytes);
+                Deserialize::deserialize(&mut schema_de).map_err(|err| err.to_string())
+            });
+
+            match schemas_cell.as_ref() {
+                Ok(schemas) => Ok(schemas.as_slice()),
+                Err(err) => Err(ncf_core::NcfError::Header(err.clone())),
+            }
+        })
     }
 
     pub fn read_tensor(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        let schema = match self.find_schema(name) {
+        let schema = match self.find_schema(name)? {
             Some(schema) => schema,
             None => return Ok(None),
         };

@@ -12,7 +12,7 @@ fn inspect_ncf(path: &str) -> PyResult<String> {
     let metadata = reader.metadata();
     out.push_str(&format!("Model: {}\n", metadata.metadata.model_name));
     out.push_str(&format!("Architecture: {}\n", metadata.metadata.architecture));
-    let schemas = reader.schemas();
+    let schemas = reader.schemas().map_err(|err| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string()))?;
     out.push_str(&format!("Tensors: {}\n", schemas.len()));
     for tensor in schemas {
         out.push_str(&format!("- {} {} {:?}\n", tensor.name, tensor.dtype, tensor.shape));
