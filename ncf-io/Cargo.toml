@@ -9,8 +9,10 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ncf-core = { path = "../ncf-core" }
 memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }
+serde_cbor = "0.11"
 ciborium = { version = "0.2", features = ["std"] }
 thiserror = "1.0"
+self_cell = "1.2.2"
 
 [dev-dependencies]
 criterion = { workspace = true }

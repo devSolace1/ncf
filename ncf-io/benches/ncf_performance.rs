@@ -139,7 +139,7 @@ fn benchmark_ncf_reader_open(c: &mut Criterion) {
     c.bench_function("ncf_reader_open", |b| {
         b.iter(|| {
             let reader = NcfReader::open(&sample_path).expect("open sample ncf");
-            black_box(&reader.metadata.metadata.model_name);
+            black_box(reader.metadata().metadata.model_name.as_str());
         })
     });
 }
@@ -177,7 +177,7 @@ fn benchmark_ncf_realistic_load(c: &mut Criterion) {
     c.bench_function("ncf_realistic_load", |b| {
         b.iter(|| {
             let reader = NcfReader::open(&sample_path).expect("open realistic ncf");
-            black_box(reader.schemas.len());
+            black_box(reader.schema_count());
         })
     });
 }
