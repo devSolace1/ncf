@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "ncf-core",
+    "ncf-io",
+    "ncf-cli",
+    "ncf-convert",
+    "ncf-py",
+]
+
+[workspace.dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }

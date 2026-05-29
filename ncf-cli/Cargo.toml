@@ -1,0 +1,11 @@
+[package]
+name = "ncf-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.3", features = ["derive"] }
+ncf-convert = { path = "../ncf-convert" }
+ncf-io = { path = "../ncf-io" }
+ncf-core = { path = "../ncf-core" }

@@ -1,0 +1,48 @@
+name: NCF Benchmark Regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ncf-core/**'
+      - 'ncf-io/**'
+
+jobs:
+  benchmark:
+    name: Benchmark NCF Performance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run benchmark suite
+        run: cargo bench --bench ncf_performance
+
+      - name: Compare benchmark results and report regression
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          benchmark-command: cargo bench --bench ncf_performance
+          baseline-command: cargo bench --bench ncf_performance
+          fail-on-alert: true
+          alert: "10%"
+          comment: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
