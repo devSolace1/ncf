@@ -1,0 +1,47 @@
+[package]
+name = "ncf-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+ciborium = "0.2"
+
+[dependencies.ncf-core]
+path = "../ncf-core"
+
+[dependencies.ncf-io]
+path = "../ncf-io"
+
+[[bin]]
+name = "fuzz_header_parser"
+path = "fuzz_targets/fuzz_header_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_header"
+path = "fuzz_targets/fuzz_cbor_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_index_parser"
+path = "fuzz_targets/fuzz_index_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_full_open"
+path = "fuzz_targets/fuzz_full_open.rs"
+test = false
+doc = false
+bench = false

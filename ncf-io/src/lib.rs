@@ -7,3 +7,6 @@ pub use mmap::NcfMmap;
 pub use reader::NcfReader;
 pub use writer::NcfWriter;
 pub use stream::NcfStream;
+
+#[cfg(test)]
+mod roundtrip_tests;

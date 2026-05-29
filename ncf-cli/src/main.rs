@@ -55,12 +55,13 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Info { file } => {
             let reader = ncf_io::NcfReader::open(file)?;
-            println!("NCF v{}", reader.header_prefix.version);
-            println!("Flags: {}", reader.header_prefix.flags);
-            println!("Header length: {}", reader.header_prefix.header_len);
-            println!("Schema offset: {}", reader.header_prefix.schema_offset);
-            println!("Index offset: {}", reader.header_prefix.index_offset);
-            println!("Chunk count: {}", reader.header_prefix.chunk_count);
+            let prefix = reader.header_prefix();
+            println!("NCF v{}", prefix.version);
+            println!("Flags: {}", prefix.flags);
+            println!("Header length: {}", prefix.header_len);
+            println!("Schema offset: {}", prefix.schema_offset);
+            println!("Index offset: {}", prefix.index_offset);
+            println!("Chunk count: {}", prefix.chunk_count);
         }
         Commands::Create { input, output, name } => {
             let bytes = fs::read(&input)?;

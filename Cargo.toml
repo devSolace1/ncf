@@ -6,6 +6,7 @@ members = [
     "ncf-cli",
     "ncf-convert",
     "ncf-py",
+    "fuzz",
 ]
 
 [workspace.dependencies]
