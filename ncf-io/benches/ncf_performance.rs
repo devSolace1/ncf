@@ -203,6 +203,38 @@ fn benchmark_ncf_reader_tensor_slice(c: &mut Criterion) {
     });
 }
 
+fn benchmark_ncf_sequential_layer_access(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_sequential.ncf");
+    build_realistic_ncf(&sample_path);
+    let mmap = NcfMmap::open(&sample_path).expect("open realistic ncf mmap");
+
+    c.bench_function("ncf_sequential_layer_access", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for i in 0..REALISTIC_LAYER_COUNT {
+                let tensor_name = format!("layer_{:03}", i);
+                let slice = mmap.tensor_slice(&tensor_name).expect("slice missing");
+                total = total.wrapping_add(slice.len());
+            }
+            black_box(total);
+        })
+    });
+}
+
+fn benchmark_safetensors_sequential_layer_access(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("safetensors_benchmark_sequential.safetensors");
+    build_realistic_safetensors(&sample_path);
+    let bytes = fs::read(&sample_path).expect("read safetensors sample");
+
+    c.bench_function("safetensors_sequential_layer_access", |b| {
+        b.iter(|| {
+            let tensors = SafeTensors::deserialize(black_box(&bytes)).expect("deserialize safetensors");
+            let total: usize = tensors.iter().map(|(_, view)| view.data_len()).sum();
+            black_box(total);
+        })
+    });
+}
+
 fn benchmark_safetensors_load_equivalent(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("safetensors_benchmark_sample.safetensors");
     build_sample_safetensors(&sample_path);
@@ -309,6 +341,8 @@ criterion_group!(
     benchmark_ncf_reader_open_realistic,
     benchmark_ncf_mmap_tensor_slice,
     benchmark_ncf_reader_tensor_slice,
+    benchmark_ncf_sequential_layer_access,
+    benchmark_safetensors_sequential_layer_access,
     benchmark_safetensors_load_equivalent,
     benchmark_ncf_realistic_load,
     benchmark_safetensors_realistic_load,
