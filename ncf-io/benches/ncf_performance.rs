@@ -1,4 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use memmap2::MmapOptions;
 use ncf_core::header::{Metadata, NcfHeader, NcfFlags};
 use ncf_core::schema::{Compression, DType, Encoding, Layout, TensorSchema};
 use ncf_io::{NcfMmap, NcfReader, NcfWriter};
@@ -9,6 +10,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
+
+const REALISTIC_LAYER_COUNT: usize = 16;
+const REALISTIC_TENSOR_BYTES: usize = 32 * 1024 * 1024; // 32 MiB per tensor, ~512 MiB model
 
 struct SafeTensorView<'a> {
     dtype: SafeDtype,
@@ -41,7 +45,7 @@ struct OwnedSafeTensor {
     data: Vec<u8>,
 }
 
-fn build_sample_ncf_with_layers(path: &Path, layer_count: usize) {
+fn build_sample_ncf_with_layers(path: &Path, layer_count: usize, tensor_bytes: usize) {
     if path.exists() {
         let _ = fs::remove_file(path);
     }
@@ -60,13 +64,16 @@ fn build_sample_ncf_with_layers(path: &Path, layer_count: usize) {
 
     let mut writer = NcfWriter::new(metadata, NcfFlags::empty());
 
+    let elements = tensor_bytes / 4;
+    let shape = vec![elements as u64, 1];
+
     for i in 0..layer_count {
         let name = format!("layer_{:03}", i);
-        let payload = vec![i as u8; 128 * 256 * 4];
+        let payload = vec![i as u8; tensor_bytes];
         let schema = TensorSchema {
             name,
             dtype: DType::F32,
-            shape: vec![128, 256],
+            shape: shape.clone(),
             column_layout: Layout::RowMajor,
             compression: Compression::None,
             encoding: Encoding::Plain,
@@ -78,26 +85,25 @@ fn build_sample_ncf_with_layers(path: &Path, layer_count: usize) {
     writer.finalize(path).expect("failed to create benchmark NCF");
 }
 
-fn build_sample_ncf(path: &Path) {
-    build_sample_ncf_with_layers(path, 4);
-}
-
-fn build_sample_safetensors(path: &Path) {
+fn build_sample_safetensors(path: &Path, layer_count: usize, tensor_bytes: usize) {
     if path.exists() {
         let _ = fs::remove_file(path);
     }
 
+    let elements = tensor_bytes / 4;
+    let shape = vec![elements, 1];
+
     let mut tensors = Vec::new();
-    for i in 0..8 {
+    for i in 0..layer_count {
         tensors.push(OwnedSafeTensor {
-            name: format!("tensor_{:02}", i),
+            name: format!("layer_{:03}", i),
             dtype: SafeDtype::F32,
-            shape: vec![256, 256],
-            data: vec![i as u8; 256 * 256 * 4],
+            shape: shape.clone(),
+            data: vec![i as u8; tensor_bytes],
         });
     }
 
-    let serialized = safetensors::serialize(
+    safetensors::serialize_to_file(
         tensors.iter().map(|tensor| {
             (
                 tensor.name.as_str(),
@@ -109,10 +115,21 @@ fn build_sample_safetensors(path: &Path) {
             )
         }),
         None,
+        &path,
     )
     .expect("failed to serialize safetensors");
+}
 
-    fs::write(path, serialized).expect("failed to write safetensors sample");
+fn build_sample_ncf(path: &Path) {
+    build_sample_ncf_with_layers(path, 4, 4 * 1024 * 1024);
+}
+
+fn build_realistic_ncf(path: &Path) {
+    build_sample_ncf_with_layers(path, REALISTIC_LAYER_COUNT, REALISTIC_TENSOR_BYTES);
+}
+
+fn build_realistic_safetensors(path: &Path) {
+    build_sample_safetensors(path, REALISTIC_LAYER_COUNT, REALISTIC_TENSOR_BYTES);
 }
 
 fn benchmark_ncf_reader_open(c: &mut Criterion) {
@@ -142,7 +159,7 @@ fn benchmark_ncf_mmap_tensor_slice(c: &mut Criterion) {
 
 fn benchmark_safetensors_load_equivalent(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("safetensors_benchmark_sample.safetensors");
-    build_sample_safetensors(&sample_path);
+    build_sample_safetensors(&sample_path, 8, 8 * 1024 * 1024);
     let bytes = fs::read(&sample_path).expect("read safetensors sample");
 
     c.bench_function("safetensors_load_equivalent", |b| {
@@ -153,9 +170,35 @@ fn benchmark_safetensors_load_equivalent(c: &mut Criterion) {
     });
 }
 
+fn benchmark_ncf_realistic_load(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_realistic.ncf");
+    build_realistic_ncf(&sample_path);
+
+    c.bench_function("ncf_realistic_load", |b| {
+        b.iter(|| {
+            let reader = NcfReader::open(&sample_path).expect("open realistic ncf");
+            black_box(reader.schemas.len());
+        })
+    });
+}
+
+fn benchmark_safetensors_realistic_load(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("safetensors_benchmark_realistic.safetensors");
+    build_realistic_safetensors(&sample_path);
+    let file = fs::File::open(&sample_path).expect("open realistic safetensors");
+    let mmap = unsafe { MmapOptions::new().map(&file).expect("memory map safetensors file") };
+
+    c.bench_function("safetensors_realistic_load", |b| {
+        b.iter(|| {
+            let tensors = SafeTensors::deserialize(black_box(&mmap[..])).expect("deserialize realistic safetensors");
+            black_box(tensors.iter().count());
+        })
+    });
+}
+
 fn benchmark_ncf_parallel_chunk_load(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_parallel.ncf");
-    build_sample_ncf_with_layers(&sample_path, 8);
+    build_sample_ncf_with_layers(&sample_path, 8, 4 * 1024 * 1024);
     let mmap = NcfMmap::open(&sample_path).expect("open sample ncf mmap");
 
     c.bench_function("ncf_parallel_chunk_load", |b| {
@@ -176,7 +219,7 @@ fn benchmark_ncf_parallel_chunk_load(c: &mut Criterion) {
 
 fn benchmark_ncf_selective_layer_load(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_selective.ncf");
-    build_sample_ncf_with_layers(&sample_path, 32);
+    build_sample_ncf_with_layers(&sample_path, 32, 4 * 1024 * 1024);
     let mmap = NcfMmap::open(&sample_path).expect("open sample ncf mmap");
 
     c.bench_function("ncf_selective_layer_load", |b| {
@@ -189,7 +232,7 @@ fn benchmark_ncf_selective_layer_load(c: &mut Criterion) {
 
 fn benchmark_ncf_streaming_chunk_verify(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_streaming.ncf");
-    build_sample_ncf_with_layers(&sample_path, 4);
+    build_sample_ncf_with_layers(&sample_path, 4, 4 * 1024 * 1024);
     let mmap = NcfMmap::open(&sample_path).expect("open sample ncf mmap");
 
     c.bench_function("ncf_streaming_chunk_verify", |b| {
@@ -206,6 +249,8 @@ criterion_group!(
     benchmark_ncf_reader_open,
     benchmark_ncf_mmap_tensor_slice,
     benchmark_safetensors_load_equivalent,
+    benchmark_ncf_realistic_load,
+    benchmark_safetensors_realistic_load,
     benchmark_ncf_parallel_chunk_load,
     benchmark_ncf_selective_layer_load,
     benchmark_ncf_streaming_chunk_verify,
