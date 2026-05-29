@@ -179,6 +179,32 @@ impl NcfReader {
         self.borrow_dependent().schemas.len()
     }
 
+    pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        let chunk_id = self.borrow_dependent().index.tensor_map.get(name)?;
+        let entry = self.borrow_dependent().index.entries.iter().find(|entry| &entry.chunk_id == chunk_id)?;
+        let data = self.borrow_owner();
+
+        let offset_start = (entry.byte_offset as usize)
+            .checked_add(CHUNK_HEADER_SIZE as usize)?;
+        if offset_start > data.len() {
+            return None;
+        }
+
+        let chunk_total_len = entry.byte_len as usize;
+        let chunk_overhead = (CHUNK_HEADER_SIZE + CHUNK_CHECKSUM_SIZE) as usize;
+        if chunk_total_len < chunk_overhead {
+            return None;
+        }
+
+        let data_len = chunk_total_len - chunk_overhead;
+        let offset_end = offset_start.checked_add(data_len)?;
+        if offset_end > data.len() {
+            return None;
+        }
+
+        Some(&data[offset_start..offset_end])
+    }
+
     pub fn header_prefix(&self) -> FileHeaderPrefix {
         self.borrow_dependent().header_prefix
     }

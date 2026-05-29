@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod round_trip_tests {
     use ncf_core::header::{Metadata, NcfHeader, NcfFlags};
-    use ncf_core::schema::{ChunkRef, Compression, DType, Encoding, Layout, TensorSchema};
-    use ncf_io::{NcfReader, NcfWriter};
+    use ncf_core::schema::{Compression, DType, Encoding, Layout, TensorSchema};
+    use crate::{NcfReader, NcfWriter};
     use std::fs;
     use tempfile::TempDir;
 
@@ -48,7 +48,7 @@ mod round_trip_tests {
                 // Create deterministic u8 data
                 let mut data = Vec::with_capacity(element_count);
                 for i in 0..element_count {
-                    data.push(((i as u8) ^ 0xFF));
+                    data.push((i as u8) ^ 0xFF);
                 }
                 data
             }

@@ -15,6 +15,9 @@ jobs:
   benchmark:
     name: Benchmark NCF Performance
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C target-cpu=native'
 
     steps:
       - name: Checkout repository
@@ -28,6 +31,21 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Gather runner and Rust metadata
+        run: |
+          echo '--- Runner environment ---'
+          uname -a
+          echo
+          echo '--- CPU details ---'
+          lscpu
+          echo
+          echo '--- Rust toolchain ---'
+          rustc -Vv
+          cargo -V
+          echo
+          echo '--- Benchmark dataset configuration ---'
+          echo 'Deterministic random payloads with fixed seed, identical NCF and SafeTensors data shapes'
+
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -40,7 +58,7 @@ jobs:
 
       - name: Run benchmark suite
         run: |
-          cargo bench --bench ncf_performance -- --output-format bencher --noplot --quiet | tee benchmark-output.txt
+          cargo bench --bench ncf_performance --release -- --output-format bencher --noplot --quiet --measurement-time 10 --confidence-level 0.99 | tee benchmark-output.txt
 
       - name: Cache benchmark data
         uses: actions/cache@v4
