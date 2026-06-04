@@ -38,3 +38,33 @@ jobs:
       - name: Run tests for package
         run: |
           cargo test -p ${{ matrix.package }} --quiet
+
+  fuzz:
+    name: Fuzz smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target smoke test
+        working-directory: fuzz
+        run: cargo fuzz run fuzz_full_open -- -runs=100

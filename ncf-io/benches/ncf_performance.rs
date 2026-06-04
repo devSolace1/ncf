@@ -76,6 +76,10 @@ fn build_realistic_tensor_payload(layer_count: usize, tensor_bytes: usize) -> Ve
 }
 
 fn build_ncf_from_payloads(path: &Path, payloads: &[TensorPayload]) {
+    build_ncf_from_payloads_with_compression(path, payloads, Compression::None);
+}
+
+fn build_ncf_from_payloads_with_compression(path: &Path, payloads: &[TensorPayload], compression: Compression) {
     if path.exists() {
         let _ = fs::remove_file(path);
     }
@@ -100,7 +104,7 @@ fn build_ncf_from_payloads(path: &Path, payloads: &[TensorPayload]) {
             dtype: DType::F32,
             shape: payload.shape.clone(),
             column_layout: Layout::RowMajor,
-            compression: Compression::None,
+            compression,
             encoding: Encoding::Plain,
             chunks: Vec::new(),
         };
@@ -317,6 +321,33 @@ fn benchmark_ncf_parallel_chunk_load(c: &mut Criterion) {
     });
 }
 
+fn benchmark_ncf_compressed_open(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_compressed.ncf");
+    let payloads = build_realistic_tensor_payload(8, 4 * 1024 * 1024);
+    build_ncf_from_payloads_with_compression(&sample_path, &payloads, Compression::Zstd(3));
+
+    c.bench_function("ncf_compressed_reader_open", |b| {
+        b.iter(|| {
+            let reader = NcfReader::open(&sample_path).expect("open compressed ncf");
+            black_box(reader.schema_count().expect("schema count"));
+        })
+    });
+}
+
+fn benchmark_ncf_compressed_read(c: &mut Criterion) {
+    let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_compressed_read.ncf");
+    let payloads = build_realistic_tensor_payload(8, 4 * 1024 * 1024);
+    build_ncf_from_payloads_with_compression(&sample_path, &payloads, Compression::Lz4);
+    let reader = NcfReader::open(&sample_path).expect("open compressed ncf");
+
+    c.bench_function("ncf_compressed_read_tensor", |b| {
+        b.iter(|| {
+            let data = reader.read_tensor("layer_000").expect("read tensor").expect("tensor missing");
+            black_box(data.len());
+        })
+    });
+}
+
 fn benchmark_ncf_partial_layer_load(c: &mut Criterion) {
     let sample_path = PathBuf::from(std::env::temp_dir()).join("ncf_benchmark_partial.ncf");
     build_sample_ncf_with_layers(&sample_path, PARTIAL_LAYER_COUNT, PARTIAL_TENSOR_BYTES);
@@ -375,6 +406,8 @@ criterion_group!(
     benchmark_ncf_realistic_load,
     benchmark_safetensors_realistic_load,
     benchmark_ncf_parallel_chunk_load,
+    benchmark_ncf_compressed_open,
+    benchmark_ncf_compressed_read,
     benchmark_ncf_partial_layer_load,
     benchmark_safetensors_partial_layer_access,
     benchmark_ncf_streaming_chunk_verify,

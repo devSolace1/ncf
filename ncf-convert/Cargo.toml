@@ -11,3 +11,7 @@ ncf-io = { path = "../ncf-io" }
 safetensors = "0.7"
 gguf = "0.1.2"
 serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = "3"

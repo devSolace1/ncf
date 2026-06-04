@@ -216,6 +216,68 @@ mod round_trip_tests {
         fs::remove_file(file_path).ok();
     }
 
+    fn test_compressed_roundtrip(compression: Compression) {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test_compressed.ncf");
+
+        let test_data = create_test_data(DType::U8, 128);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let metadata = NcfHeader {
+            metadata: Metadata {
+                model_name: format!("test_compressed_{:?}", compression),
+                architecture: "test".to_string(),
+                created_at: now,
+                author: None,
+                license: None,
+                quantization: None,
+                custom: Default::default(),
+            },
+        };
+
+        let mut writer = NcfWriter::new(metadata, NcfFlags::empty());
+        let schema = TensorSchema {
+            name: "tensor_u8".to_string(),
+            dtype: DType::U8,
+            shape: vec![128],
+            column_layout: Layout::RowMajor,
+            compression,
+            encoding: Encoding::Plain,
+            chunks: vec![],
+        };
+        writer.add_tensor(schema, test_data.clone());
+        writer.finalize(&file_path).expect("Failed to write compressed NCF");
+
+        let reader = NcfReader::open(&file_path).expect("Failed to open compressed NCF file");
+        let read_data = reader
+            .read_tensor("tensor_u8")
+            .expect("Failed to read tensor")
+            .expect("Tensor missing");
+
+        assert_eq!(test_data, read_data);
+        assert!(reader.verify_all().expect("Failed to verify compressed NCF"));
+
+        fs::remove_file(file_path).ok();
+    }
+
+    #[test]
+    fn test_roundtrip_zstd_compression() {
+        test_compressed_roundtrip(Compression::Zstd(3));
+    }
+
+    #[test]
+    fn test_roundtrip_lz4_compression() {
+        test_compressed_roundtrip(Compression::Lz4);
+    }
+
+    #[test]
+    fn test_roundtrip_snappy_compression() {
+        test_compressed_roundtrip(Compression::Snappy);
+    }
+
     // ============ DTYPE TESTS ============
 
     #[test]

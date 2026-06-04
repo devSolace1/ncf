@@ -52,6 +52,10 @@ enum Commands {
         #[arg(long)]
         author: Option<String>,
     },
+    Verify {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -106,6 +110,23 @@ fn main() -> anyhow::Result<()> {
         Commands::ConvertGguf { input, output, architecture, author } => {
             gguf_to_ncf(input, output, architecture.as_deref(), author.as_deref())?;
             println!("Converted GGUF to NCF.");
+        }
+        Commands::Verify { file } => {
+            let reader = ncf_io::NcfReader::open(file)?;
+            let schemas = reader.schemas()?;
+            let mut all_valid = true;
+            for schema in schemas {
+                let valid = reader.verify_tensor(&schema.name)?;
+                println!("{}: {}", schema.name, if valid { "ok" } else { "FAILED" });
+                if !valid {
+                    all_valid = false;
+                }
+            }
+            if all_valid {
+                println!("Verification completed successfully.");
+            } else {
+                anyhow::bail!("NCF verification failed: one or more tensors failed validation");
+            }
         }
     }
     Ok(())

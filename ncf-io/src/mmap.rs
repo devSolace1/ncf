@@ -149,6 +149,9 @@ impl NcfMmap {
     }
 
     /// Return a zero-copy slice of the tensor payload for the given name.
+    ///
+    /// For compressed tensors, this returns the raw compressed payload bytes.
+    /// Use a full read operation if you need decompressed tensor contents.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.index.tensor_map.get(name)?;
         let entry = self.index.chunk_map.get(chunk_id)?;

@@ -214,6 +214,9 @@ impl NcfReader {
     }
 
     /// Return a zero-copy slice for a tensor payload by name, if present.
+    ///
+    /// For compressed tensors, this returns the raw compressed payload bytes.
+    /// Use `read_tensor()` to get a fully decompressed payload instead.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.borrow_dependent().index.tensor_map.get(name)?;
         let entry = self.borrow_dependent().index.chunk_map.get(chunk_id)?;
@@ -238,6 +241,125 @@ impl NcfReader {
         }
 
         Some(&data[offset_start..offset_end])
+    }
+
+    /// Verify the integrity and checksum of a single named tensor.
+    pub fn verify_tensor(&self, name: &str) -> Result<bool> {
+        let schema = self
+            .find_schema(name)?
+            .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "tensor schema not found"))?;
+
+        for chunk in &schema.chunks {
+            if !self.verify_chunk(schema, chunk)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn verify_chunk(&self, schema: &TensorSchema, chunk: &ncf_core::schema::ChunkRef) -> Result<bool> {
+        let data = self.borrow_owner();
+
+        let header_start = chunk.byte_offset as usize;
+        let header_end = header_start
+            .checked_add(CHUNK_HEADER_SIZE as usize)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "chunk header overflow"))?;
+        if header_end > data.len() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("chunk header out of bounds: end={}, file_size={}", header_end, data.len()),
+            )
+            .into());
+        }
+
+        let chunk_header = ChunkHeader::decode(&data[header_start..header_end])?;
+        if chunk_header.chunk_id != chunk.chunk_id {
+            return Ok(false);
+        }
+        if chunk_header.flags == 0 && schema.compression != Compression::None {
+            return Ok(false);
+        }
+        if chunk_header.flags != 0 && schema.compression == Compression::None {
+            return Ok(false);
+        }
+
+        let offset_start = header_end;
+        let chunk_total_len = chunk.byte_len as usize;
+        let chunk_overhead = (CHUNK_HEADER_SIZE + CHUNK_CHECKSUM_SIZE) as usize;
+        if chunk_total_len < chunk_overhead {
+            return Ok(false);
+        }
+
+        let payload_len = chunk_total_len - chunk_overhead;
+        if chunk_header.compressed_len != payload_len as u64 {
+            return Ok(false);
+        }
+
+        let offset_end = offset_start.checked_add(payload_len).ok_or_else(|| {
+            std::io::Error::new(ErrorKind::InvalidData, "chunk payload size overflow")
+        })?;
+        if offset_end > data.len() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("chunk payload out of bounds: end={}, file_size={}", offset_end, data.len()),
+            )
+            .into());
+        }
+
+        let payload = &data[offset_start..offset_end];
+        let checksum_start = offset_end;
+        let checksum_end = checksum_start.checked_add(CHUNK_CHECKSUM_SIZE as usize).ok_or_else(|| {
+            std::io::Error::new(ErrorKind::InvalidData, "checksum range overflow")
+        })?;
+        if checksum_end > data.len() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("checksum out of bounds: end={}, file_size={}", checksum_end, data.len()),
+            )
+            .into());
+        }
+
+        let stored_checksum = &data[checksum_start..checksum_end];
+        if stored_checksum != chunk.checksum {
+            return Ok(false);
+        }
+
+        let decompressed = match schema.compression {
+            Compression::None => payload.to_vec(),
+            Compression::Zstd(_) => zstd::decode_all(payload).map_err(|err| {
+                std::io::Error::new(ErrorKind::InvalidData, format!("Zstd decompression failed: {}", err))
+            })?,
+            Compression::Lz4 => decompress_size_prepended(payload).map_err(|err| {
+                std::io::Error::new(ErrorKind::InvalidData, format!("LZ4 decompression failed: {}", err))
+            })?,
+            Compression::Snappy => {
+                let mut decoder = SnappyDecoder::new();
+                decoder.decompress_vec(payload).map_err(|err| {
+                    std::io::Error::new(ErrorKind::InvalidData, format!("Snappy decompression failed: {}", err))
+                })?
+            }
+        };
+
+        if decompressed.len() as u64 != chunk.uncompressed_len {
+            return Ok(false);
+        }
+        if chunk_header.uncompressed_len != chunk.uncompressed_len {
+            return Ok(false);
+        }
+
+        let computed = blake3::hash(&decompressed);
+        Ok(*computed.as_bytes() == chunk.checksum)
+    }
+
+    /// Verify every tensor in the file and return true only if all tensors pass validation.
+    pub fn verify_all(&self) -> Result<bool> {
+        for schema in self.schemas()? {
+            if !self.verify_tensor(&schema.name)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Return the parsed file header prefix.
