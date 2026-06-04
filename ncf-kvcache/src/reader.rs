@@ -121,6 +121,39 @@ impl KvcacheReader {
         self.borrow_dependent().header.element_bytes as usize
     }
 
+    /// Return a read-only reference to the parsed cache header.
+    pub fn header(&self) -> &KvCacheHeader {
+        &self.borrow_dependent().header
+    }
+
+    /// Return the parsed CBOR metadata block.
+    pub fn metadata(&self) -> &KvCacheMetadata {
+        &self.borrow_dependent().metadata
+    }
+
+    /// Return the number of committed tokens visible to readers.
+    pub fn visible_token_count(&self) -> u64 {
+        self.valid_token_count()
+    }
+
+    /// Return the number of valid tokens in the given block entry.
+    pub fn block_token_count(&self, layer: u32, head: u32, block_idx: u64) -> Option<u32> {
+        self.borrow_dependent()
+            .index
+            .get(layer, head, block_idx)
+            .map(|entry| entry.token_count)
+    }
+
+    /// Read a whole per-column block as a zero-copy byte slice.
+    pub fn block_bytes(&self, layer: u32, head: u32, block_idx: u64) -> Option<&[u8]> {
+        let entry = self.borrow_dependent().index.get(layer, head, block_idx)?;
+        let start = entry
+            .byte_offset
+            .checked_sub(self.borrow_dependent().payload_offset as u64)? as usize;
+        let end = start.checked_add(entry.byte_len as usize)?;
+        Some(&self.borrow_dependent().payload[start..end])
+    }
+
     /// Read a single token slice for a given layer/head and token index.
     pub fn token_bytes(&self, layer: u32, head: u32, token_index: u64) -> Option<&[u8]> {
         if token_index >= self.valid_token_count() {

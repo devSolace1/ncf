@@ -1,9 +1,13 @@
 use std::path::Path;
 
 use crate::writer::NcfWriter;
-use ncf_core::header::{NcfFlags, NcfHeader, FileHeaderPrefix};
+use ncf_core::header::{NcfFlags, NcfHeader};
 use ncf_core::schema::TensorSchema;
+#[cfg(feature = "streaming")]
+use ncf_core::header::FileHeaderPrefix;
+#[cfg(feature = "streaming")]
 use ncf_core::chunk::ChunkHeader;
+#[cfg(feature = "streaming")]
 use ncf_core::constants::{CHUNK_CHECKSUM_SIZE, CHUNK_HEADER_SIZE, FILE_HEADER_PREFIX_SIZE};
 use ncf_core::Result;
 

@@ -9,7 +9,7 @@ use ncf_core::Result;
 use snap::raw::Encoder as SnappyEncoder;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -24,19 +24,19 @@ fn compress_payload(data: &[u8], compression: Compression) -> Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(data.to_vec()),
         Compression::Zstd(level) => zstd::encode_all(data, level.into()).map_err(|err| {
-            NcfError::Io(std::io::Error::new(
-                ErrorKind::Other,
-                format!("Zstd compression failed: {}", err),
-            ))
+            NcfError::Io(std::io::Error::other(format!(
+                "Zstd compression failed: {}",
+                err
+            )))
         }),
         Compression::Lz4 => Ok(compress_prepend_size(data)),
         Compression::Snappy => {
             let mut encoder = SnappyEncoder::new();
             encoder.compress_vec(data).map_err(|err| {
-                NcfError::Io(std::io::Error::new(
-                    ErrorKind::Other,
-                    format!("Snappy compression failed: {}", err),
-                ))
+                NcfError::Io(std::io::Error::other(format!(
+                    "Snappy compression failed: {}",
+                    err
+                )))
             })
         }
     }

@@ -230,6 +230,16 @@ impl KvCacheWriter {
         Ok(())
     }
 
+    /// Flush any partially filled block to disk without stopping the worker.
+    pub fn flush_pending(&mut self) -> Result<()> {
+        self.flush_block(false)
+    }
+
+    /// Read the current visible token count from the mmap header.
+    pub fn visible_token_count(&self) -> u64 {
+        self.get_header_atomic().load(Ordering::Acquire)
+    }
+
     fn flush_block(&mut self, final_block: bool) -> Result<()> {
         let token_count = self.buffers[0].token_count;
         if token_count == 0 {
@@ -304,8 +314,14 @@ impl KvCacheWriter {
                 count, self.current_token_count
             )));
         }
+
         self.current_token_count = count;
         self.update_valid_token_count(count)
+    }
+
+    /// Return the current local token count that has been appended.
+    pub fn local_token_count(&self) -> u64 {
+        self.current_token_count
     }
 }
 
