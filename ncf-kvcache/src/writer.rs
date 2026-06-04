@@ -1,6 +1,7 @@
 use crate::error::KvcacheError;
 use crate::header::{self, KVCACHE_HEADER_SIZE, KVCACHE_TRAILER_MAGIC, KvCacheConfig, KvCacheHeader, KvCacheMetadata};
 use crate::index::{ChunkIndexEntry, IndexBlock, IndexTrailer};
+use crate::reader::KvcacheReader;
 use crate::Result;
 use ciborium::ser::into_writer;
 use crossbeam_channel::{self, Receiver, Sender};
@@ -17,6 +18,7 @@ struct ColumnBuffer {
     head: u32,
     block_idx: u64,
     token_count: u32,
+    existing_tokens: u32,
     data: Vec<u8>,
 }
 
@@ -27,6 +29,7 @@ impl ColumnBuffer {
             head,
             block_idx: 0,
             token_count: 0,
+            existing_tokens: 0,
             data: Vec::with_capacity(header::BLOCK_TOKEN_COUNT * element_bytes),
         }
     }
@@ -40,6 +43,7 @@ impl ColumnBuffer {
         self.data.clear();
         self.data.reserve(header::BLOCK_TOKEN_COUNT * element_bytes);
         self.token_count = 0;
+        self.existing_tokens = 0;
         self.block_idx = self.block_idx.wrapping_add(1);
     }
 }
@@ -48,6 +52,7 @@ struct FlushBatch {
     block_idx: u64,
     batch_epoch: u64,
     token_count: u32,
+    existing_tokens: u32,
     entries: Vec<ChunkIndexEntry>,
     payloads: Vec<Vec<u8>>,
     prev_index_offset: u64,
@@ -125,6 +130,73 @@ impl KvCacheWriter {
             current_token_count: 0,
             next_chunk_id: 0,
             pending_block_idx: 0,
+            flush_error,
+        })
+    }
+
+    /// Open an existing cache file for appending.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let reader = KvcacheReader::open(&path)?;
+        let config = KvCacheConfig {
+            layers: reader.header().layers,
+            heads: reader.header().heads,
+            element_bytes: reader.header().element_bytes,
+        };
+        let committed = reader.visible_token_count();
+        let last_block_idx = if committed == 0 {
+            0
+        } else {
+            (committed - 1) / header::BLOCK_TOKEN_COUNT as u64
+        };
+        let partial_count = (committed % header::BLOCK_TOKEN_COUNT as u64) as u32;
+        let pending_block_idx = if partial_count == 0 {
+            committed / header::BLOCK_TOKEN_COUNT as u64
+        } else {
+            last_block_idx
+        };
+        let next_chunk_id = reader.index().next_chunk_id();
+
+        let header_file = OpenOptions::new().read(true).write(true).open(&path)?;
+        let header_mmap = unsafe { MmapMut::map_mut(&header_file)? };
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let flush_error = Arc::new(Mutex::new(None));
+        let thread_path = path.clone();
+        let error_clone = flush_error.clone();
+        let handle = thread::Builder::new()
+            .name("ncf-kvcache-flush".into())
+            .spawn(move || Self::flush_loop(thread_path, receiver, error_clone))?;
+
+        let mut buffers = Vec::new();
+        for layer in 0..config.layers {
+            for head in 0..config.heads {
+                let mut buffer = ColumnBuffer::new(layer, head, config.element_bytes as usize);
+                buffer.block_idx = pending_block_idx;
+                if partial_count > 0 {
+                    if let Some(existing_bytes) = reader.block_bytes(layer, head, last_block_idx) {
+                        buffer.data = existing_bytes.to_vec();
+                        buffer.token_count = partial_count;
+                        buffer.existing_tokens = partial_count;
+                    } else {
+                        return Err(KvcacheError::Layout(
+                            "missing partial block payload when reopening cache".into(),
+                        ));
+                    }
+                }
+                buffers.push(buffer);
+            }
+        }
+
+        Ok(Self {
+            config,
+            buffers,
+            sender,
+            thread: Some(handle),
+            header_mmap,
+            current_token_count: committed,
+            next_chunk_id,
+            pending_block_idx,
             flush_error,
         })
     }
@@ -209,15 +281,22 @@ impl KvCacheWriter {
         file.write_all(&trailer.encode())?;
         file.flush()?;
         let header_file = OpenOptions::new().read(true).write(true).open(path)?;
-        let mut header_map = unsafe { MmapMut::map_mut(&header_file)? };
-        let mut header = KvCacheHeader::decode(&header_map[..KVCACHE_HEADER_SIZE])?;
+        let header_map = unsafe { MmapMut::map_mut(&header_file)? };
         let current_epoch = unsafe { &*(header_map.as_ptr().add(32) as *const AtomicU64) }
             .load(Ordering::Acquire);
 
         if batch.batch_epoch == current_epoch {
-            header.index_head_offset = index_offset;
-            header.valid_token_count = header.valid_token_count.saturating_add(batch.token_count as u64);
-            header_map[..KVCACHE_HEADER_SIZE].copy_from_slice(&header.encode());
+            let valid_atomic = unsafe { &*(header_map.as_ptr().add(40) as *const AtomicU64) };
+            let index_atomic = unsafe { &*(header_map.as_ptr().add(48) as *const AtomicU64) };
+            let current_valid = valid_atomic.load(Ordering::Acquire);
+            let increment = batch
+                .token_count
+                .saturating_sub(batch.existing_tokens) as u64;
+            valid_atomic.store(
+                current_valid.saturating_add(increment),
+                Ordering::Release,
+            );
+            index_atomic.store(index_offset, Ordering::Release);
             header_map.flush_async()?;
         }
 
@@ -295,6 +374,7 @@ impl KvCacheWriter {
             block_idx: self.pending_block_idx,
             batch_epoch: self.get_header_epoch().load(Ordering::Acquire),
             token_count,
+            existing_tokens: self.buffers[0].existing_tokens,
             entries,
             payloads,
             prev_index_offset,
@@ -370,6 +450,7 @@ impl KvCacheWriter {
 
         for buffer in &mut self.buffers {
             buffer.token_count = new_buffer_count;
+            buffer.existing_tokens = buffer.existing_tokens.min(new_buffer_count);
             buffer.data.truncate(new_buffer_count as usize * token_bytes);
         }
 

@@ -77,6 +77,7 @@ impl KvcacheReader {
 
     fn reconstruct_index(mmap: &Mmap, mut trailer_offset: u64) -> Result<KvcacheIndex> {
         let mut index = KvcacheIndex::default();
+        let mut blocks = Vec::new();
         while trailer_offset != 0 {
             let trailer_offset_usize = trailer_offset as usize;
             if trailer_offset_usize.checked_add(24).is_none()
@@ -99,9 +100,14 @@ impl KvcacheReader {
 
             let block: IndexBlock = from_reader(Cursor::new(&mmap[index_start..trailer_offset_usize]))
                 .map_err(KvcacheError::Cbor)?;
-            index.insert_entries(block.entries);
+            blocks.push(block);
             trailer_offset = trailer.prev_index_offset;
         }
+
+        for block in blocks.into_iter().rev() {
+            index.insert_entries(block.entries);
+        }
+
         Ok(index)
     }
 
@@ -140,6 +146,11 @@ impl KvcacheReader {
     /// Return the parsed CBOR metadata block.
     pub fn metadata(&self) -> &KvCacheMetadata {
         &self.borrow_dependent().metadata
+    }
+
+    /// Return a reference to the reconstructed index.
+    pub fn index(&self) -> &KvcacheIndex {
+        &self.borrow_dependent().index
     }
 
     /// Return the number of committed tokens visible to readers.

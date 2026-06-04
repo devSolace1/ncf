@@ -55,6 +55,11 @@ impl KvcacheIndex {
         self.block_map.get(&(layer, head, block_idx))
     }
 
+    /// Return the next chunk id available for a new append.
+    pub fn next_chunk_id(&self) -> u64 {
+        self.next_chunk_id
+    }
+
     /// Build a tensor key name for diagnostics.
     pub fn tensor_key(layer: u32, head: u32) -> String {
         format!("layer.{}.head.{}.K", layer, head)
