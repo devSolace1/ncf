@@ -120,9 +120,10 @@ impl NcfMmap {
             ).into());
         }
 
-        let index: NcfIndex = ciborium::de::from_reader(
+        let mut index: NcfIndex = ciborium::de::from_reader(
             Cursor::new(&mmap[index_start..index_end])
         )?;
+        index.chunk_map = index.entries.iter().cloned().map(|entry| (entry.chunk_id, entry)).collect();
         
         Ok(Self {
             mmap,
@@ -150,7 +151,7 @@ impl NcfMmap {
     /// Return a zero-copy slice of the tensor payload for the given name.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.index.tensor_map.get(name)?;
-        let entry = self.index.entries.iter().find(|entry| &entry.chunk_id == chunk_id)?;
+        let entry = self.index.chunk_map.get(chunk_id)?;
         
         // Bounds check: chunk offset is within file
         let offset_start = (entry.byte_offset as usize)

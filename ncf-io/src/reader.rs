@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use ciborium::de::from_reader;
 use lz4_flex::decompress_size_prepended;
-use ncf_core::chunk::{ChunkHeader, CHUNK_CHECKSUM_SIZE, CHUNK_HEADER_SIZE};
+use ncf_core::chunk::ChunkHeader;
 use ncf_core::header::{FileHeaderPrefix, NcfHeader};
 use ncf_core::index::IndexEntry;
 use ncf_core::schema::{Compression, TensorSchema};
@@ -10,30 +10,32 @@ use ncf_core::Result;
 use self_cell::self_cell;
 use serde::Deserialize;
 use snap::raw::Decoder as SnappyDecoder;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Cursor, ErrorKind};
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug)]
 /// Borrowed view of an NCF index decoded from the file.
-pub struct BorrowedNcfIndex<'a> {
+pub struct BorrowedNcfIndex {
     /// Number of entries in the index.
     pub entry_count: u64,
     /// Index entries.
     pub entries: Vec<IndexEntry>,
-    /// Mapping from tensor name to chunk id (borrowed str keys).
-    pub tensor_map: HashMap<&'a str, u64>,
+    /// Mapping from tensor name to chunk id.
+    pub tensor_map: BTreeMap<String, u64>,
+    /// Mapping from chunk id to index entry for fast lookup.
+    pub chunk_map: BTreeMap<u64, IndexEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RawBorrowedNcfIndex<'a> {
+struct RawBorrowedNcfIndex {
     pub entry_count: u64,
     pub entries: Vec<IndexEntry>,
-    #[serde(borrow)]
-    tensor_map: BTreeMap<&'a str, u64>,
+    tensor_map: BTreeMap<String, u64>,
 }
 
 self_cell! {
@@ -55,9 +57,10 @@ pub struct NcfReaderData<'this> {
     /// Byte range of the schema block within the file.
     pub schema_range: std::ops::Range<usize>,
     /// Borrowed index data referencing the mapped memory.
-    pub index: BorrowedNcfIndex<'this>,
+    pub index: BorrowedNcfIndex,
     /// Parsed file header prefix.
     pub header_prefix: FileHeaderPrefix,
+    marker: PhantomData<&'this ()>,
 }
 
 impl NcfReader {
@@ -154,25 +157,29 @@ impl NcfReader {
                 ));
             }
 
-            let raw_index: RawBorrowedNcfIndex<'_> = from_reader(Cursor::new(&mmap[index_start..index_end]))
+            let raw_index: RawBorrowedNcfIndex = from_reader(Cursor::new(&mmap[index_start..index_end]))
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-            let mut tensor_map = HashMap::with_capacity(raw_index.tensor_map.len());
-            for (name, chunk_id) in raw_index.tensor_map {
-                tensor_map.insert(name, chunk_id);
+            let tensor_map: BTreeMap<String, u64> = raw_index.tensor_map;
+
+            let mut chunk_map = BTreeMap::new();
+            for entry in &raw_index.entries {
+                chunk_map.insert(entry.chunk_id, entry.clone());
             }
 
             let index = BorrowedNcfIndex {
                 entry_count: raw_index.entry_count,
                 entries: raw_index.entries,
                 tensor_map,
+                chunk_map,
             };
 
             Ok(NcfReaderData {
                 metadata,
-                schemas: OnceCell::new(),
+                schemas: OnceLock::new(),
                 schema_range,
                 index,
                 header_prefix,
+                marker: PhantomData,
             })
         })?;
 
@@ -209,7 +216,7 @@ impl NcfReader {
     /// Return a zero-copy slice for a tensor payload by name, if present.
     pub fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         let chunk_id = self.borrow_dependent().index.tensor_map.get(name)?;
-        let entry = self.borrow_dependent().index.entries.iter().find(|entry| &entry.chunk_id == chunk_id)?;
+        let entry = self.borrow_dependent().index.chunk_map.get(chunk_id)?;
         let data = self.borrow_owner();
 
         let offset_start = (entry.byte_offset as usize)

@@ -1,7 +1,7 @@
 use ciborium::ser::into_writer;
 use lz4_flex::compress_prepend_size;
-use ncf_core::chunk::{ChunkHeader, CHUNK_CHECKSUM_SIZE, CHUNK_HEADER_SIZE};
-use ncf_core::constants::{FILE_HEADER_PREFIX_SIZE, MAX_HEADER_SIZE, MAX_INDEX_SIZE, MAX_SCHEMA_SIZE};
+use ncf_core::chunk::ChunkHeader;
+use ncf_core::constants::{CHUNK_CHECKSUM_SIZE, CHUNK_HEADER_SIZE, FILE_HEADER_PREFIX_SIZE, MAX_HEADER_SIZE, MAX_INDEX_SIZE, MAX_SCHEMA_SIZE};
 use ncf_core::header::{FileHeaderPrefix, NCF_MAGIC, NcfError, NcfFlags};
 use ncf_core::index::{IndexEntry, NcfIndex};
 use ncf_core::schema::{ChunkRef, Compression, TensorSchema};
@@ -9,7 +9,7 @@ use ncf_core::Result;
 use snap::raw::Encoder as SnappyEncoder;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{ErrorKind, Write};
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -43,6 +43,7 @@ fn compress_payload(data: &[u8], compression: Compression) -> Result<Vec<u8>> {
 }
 
 /// Writer helper to construct and write NCF files.
+#[derive(Debug)]
 pub struct NcfWriter {
     /// Header metadata to embed in the file.
     pub metadata: ncf_core::header::NcfHeader,
@@ -88,106 +89,109 @@ impl NcfWriter {
             self.flags
         };
 
-        let mut schemas: Vec<TensorSchema> = self
-            .tensors
-            .iter()
-            .map(|(tensor, _)| {
-                let mut clone = tensor.clone();
-                clone.chunks = Vec::new();
-                clone
-            })
-            .collect();
+        let schema_offset = FILE_HEADER_PREFIX_SIZE + header_len;
 
-        let chunk_payloads: Vec<PreparedChunk> = self
+        let prepared_chunks: Vec<PreparedChunk> = self
             .tensors
             .iter()
             .map(|(tensor, payload)| {
-                let compressed = compress_payload(payload, tensor.compression)?;
+                let compressed_payload = compress_payload(payload, tensor.compression)?;
+                let compressed_len = compressed_payload.len() as u64;
                 let checksum = blake3::hash(payload);
                 Ok(PreparedChunk {
-                    compressed_payload: compressed,
+                    compressed_payload,
                     checksum: *checksum.as_bytes(),
                     uncompressed_len: payload.len() as u64,
-                    compressed_len: compressed.len() as u64,
+                    compressed_len,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut schema_len_guess = 0u64;
+        let mut schemas: Vec<TensorSchema> = self
+            .tensors
+            .iter()
+            .enumerate()
+            .map(|(chunk_id, (tensor, _))| {
+                let mut clone = tensor.clone();
+                clone.chunks = vec![ChunkRef {
+                    chunk_id: chunk_id as u64,
+                    byte_offset: 0,
+                    byte_len: 0,
+                    uncompressed_len: 0,
+                    checksum: [0u8; 32],
+                }];
+                clone
+            })
+            .collect();
+
+        let mut final_schema_bytes = Vec::new();
         let mut index_entries = Vec::new();
         let mut tensor_map = BTreeMap::new();
-        let mut chunk_data = Vec::new();
-        let mut final_schema_bytes = Vec::new();
+        let mut total_chunk_bytes = 0u64;
 
         for attempt in 0..10 {
-            chunk_data.clear();
-            index_entries.clear();
-            tensor_map.clear();
-            for schema in &mut schemas {
-                schema.chunks.clear();
+            let mut schema_bytes = Vec::new();
+            into_writer(&schemas, &mut schema_bytes)?;
+            let schema_len = schema_bytes.len() as u64;
+            if schema_len > MAX_SCHEMA_SIZE {
+                return Err(NcfError::Header(format!(
+                    "Schema block size {} exceeds maximum allowed {}",
+                    schema_len, MAX_SCHEMA_SIZE
+                )));
             }
 
-            let schema_offset = FILE_HEADER_PREFIX_SIZE + header_len;
-            let current_offset = schema_offset
-                .checked_add(schema_len_guess)
-                .ok_or_else(|| NcfError::Header("schema offset overflow".into()))?;
+            let mut current_offset = schema_offset.checked_add(schema_len)
+                .ok_or_else(|| NcfError::Header("chunk offset overflow".into()))?;
+            let mut candidate_index_entries = Vec::with_capacity(self.tensors.len());
+            let mut candidate_tensor_map = BTreeMap::new();
+            let mut candidate_total_chunk_bytes = 0u64;
 
-            for (chunk_id, ((tensor, _), payload)) in self
+            for (chunk_id, ((tensor, _), prepared)) in self
                 .tensors
                 .iter()
-                .zip(chunk_payloads.iter())
+                .zip(prepared_chunks.iter())
                 .enumerate()
             {
                 let chunk_id = chunk_id as u64;
-                let chunk_header = ChunkHeader {
-                    chunk_id,
-                    flags: if payload.compressed_len != payload.uncompressed_len {
-                        1
-                    } else {
-                        0
-                    },
-                    uncompressed_len: payload.uncompressed_len,
-                    compressed_len: payload.compressed_len,
-                };
-                let chunk_offset = current_offset + chunk_data.len() as u64;
-                chunk_data.extend_from_slice(&chunk_header.encode());
-                chunk_data.extend_from_slice(&payload.compressed_payload);
-                chunk_data.extend_from_slice(&payload.checksum);
-
-                let chunk_total_len = CHUNK_HEADER_SIZE + payload.compressed_len + CHUNK_CHECKSUM_SIZE;
+                let chunk_total_len = CHUNK_HEADER_SIZE + prepared.compressed_len + CHUNK_CHECKSUM_SIZE;
                 let chunk_ref = ChunkRef {
                     chunk_id,
-                    byte_offset: chunk_offset,
+                    byte_offset: current_offset,
                     byte_len: chunk_total_len,
-                    uncompressed_len: payload.uncompressed_len,
-                    checksum: payload.checksum,
+                    uncompressed_len: prepared.uncompressed_len,
+                    checksum: prepared.checksum,
                 };
+
+                schemas[chunk_id as usize].chunks.clear();
                 schemas[chunk_id as usize].chunks.push(chunk_ref.clone());
-                index_entries.push(IndexEntry {
+
+                candidate_index_entries.push(IndexEntry {
                     chunk_id,
-                    byte_offset: chunk_offset,
+                    byte_offset: current_offset,
                     byte_len: chunk_total_len,
                     tensor_name_hash: xxhash_rust::xxh3::xxh3_64(tensor.name.as_bytes()),
                 });
-                tensor_map.entry(tensor.name.clone()).or_insert(chunk_id);
+                candidate_tensor_map.insert(tensor.name.clone(), chunk_id);
+
+                candidate_total_chunk_bytes = candidate_total_chunk_bytes
+                    .checked_add(chunk_total_len)
+                    .ok_or_else(|| NcfError::Header("chunk length overflow".into()))?;
+                current_offset = current_offset
+                    .checked_add(chunk_total_len)
+                    .ok_or_else(|| NcfError::Header("chunk offset overflow".into()))?;
             }
 
             let mut candidate_schema_bytes = Vec::new();
             into_writer(&schemas, &mut candidate_schema_bytes)?;
             let candidate_schema_len = candidate_schema_bytes.len() as u64;
 
-            if candidate_schema_len > MAX_SCHEMA_SIZE {
-                return Err(NcfError::Header(format!(
-                    "Schema block size {} exceeds maximum allowed {}",
-                    candidate_schema_len, MAX_SCHEMA_SIZE
-                )));
-            }
-
-            if candidate_schema_len == schema_len_guess {
+            if candidate_schema_len == schema_len {
                 final_schema_bytes = candidate_schema_bytes;
+                index_entries = candidate_index_entries;
+                tensor_map = candidate_tensor_map;
+                total_chunk_bytes = candidate_total_chunk_bytes;
                 break;
             }
-            schema_len_guess = candidate_schema_len;
 
             if attempt == 9 {
                 return Err(NcfError::Header(
@@ -196,13 +200,12 @@ impl NcfWriter {
             }
         }
 
-        let schema_offset = FILE_HEADER_PREFIX_SIZE + header_len;
         let index_offset = schema_offset
             .checked_add(final_schema_bytes.len() as u64)
-            .and_then(|offset| offset.checked_add(chunk_data.len() as u64))
+            .and_then(|offset| offset.checked_add(total_chunk_bytes))
             .ok_or_else(|| NcfError::Header("index offset overflow".into()))?;
-        let index = NcfIndex::new(index_entries, tensor_map);
 
+        let index = NcfIndex::new(index_entries, tensor_map);
         let mut index_bytes = Vec::new();
         into_writer(&index, &mut index_bytes)?;
         if index_bytes.len() as u64 > MAX_INDEX_SIZE {
@@ -213,9 +216,6 @@ impl NcfWriter {
         }
 
         let footer_len = (index_bytes.len() as u64).to_le_bytes();
-        let mut buffer = Vec::with_capacity(
-            48 + header_len as usize + final_schema_bytes.len() + chunk_data.len() + index_bytes.len() + 16,
-        );
         let header_prefix = FileHeaderPrefix {
             magic: *NCF_MAGIC,
             version: 0x00010000,
@@ -226,16 +226,32 @@ impl NcfWriter {
             chunk_count: self.tensors.len() as u64,
         };
 
-        buffer.extend_from_slice(&header_prefix.encode());
-        buffer.extend_from_slice(&header_bytes);
-        buffer.extend_from_slice(&final_schema_bytes);
-        buffer.extend_from_slice(&chunk_data);
-        buffer.extend_from_slice(&index_bytes);
-        buffer.extend_from_slice(b"NCFEND!!");
-        buffer.extend_from_slice(&footer_len);
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&header_prefix.encode())?;
+        writer.write_all(&header_bytes)?;
+        writer.write_all(&final_schema_bytes)?;
 
-        let mut file = File::create(path)?;
-        file.write_all(&buffer)?;
+        for (chunk_id, prepared) in prepared_chunks.iter().enumerate() {
+            let chunk_header = ChunkHeader {
+                chunk_id: chunk_id as u64,
+                flags: if prepared.compressed_len != prepared.uncompressed_len {
+                    1
+                } else {
+                    0
+                },
+                uncompressed_len: prepared.uncompressed_len,
+                compressed_len: prepared.compressed_len,
+            };
+            writer.write_all(&chunk_header.encode())?;
+            writer.write_all(&prepared.compressed_payload)?;
+            writer.write_all(&prepared.checksum)?;
+        }
+
+        writer.write_all(&index_bytes)?;
+        writer.write_all(b"NCFEND!!")?;
+        writer.write_all(&footer_len)?;
+        writer.flush()?;
         Ok(())
     }
 }

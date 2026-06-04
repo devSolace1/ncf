@@ -1,9 +1,12 @@
 #[cfg(test)]
 mod round_trip_tests {
-    use ncf_core::header::{Metadata, NcfHeader, NcfFlags};
+    use ncf_core::constants::FILE_HEADER_PREFIX_SIZE;
+    use ncf_core::header::{FileHeaderPrefix, Metadata, NCF_MAGIC, NcfFlags, NcfHeader};
+    use ncf_core::index::NcfIndex;
     use ncf_core::schema::{Compression, DType, Encoding, Layout, TensorSchema};
     use crate::{NcfReader, NcfWriter};
-    use std::fs;
+    use std::fs::{self, File};
+    use std::io::{Cursor, Write};
     use tempfile::TempDir;
 
     /// Test helper: create deterministic test data for a dtype
@@ -253,6 +256,94 @@ mod round_trip_tests {
     #[test]
     fn test_roundtrip_q8_0_basic() {
         test_single_roundtrip(DType::Q8_0, vec![10]);
+    }
+
+    #[test]
+    fn test_open_rejects_oversized_header() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("bad_header.ncf");
+
+        let header_prefix = FileHeaderPrefix {
+            magic: *NCF_MAGIC,
+            version: 0x00010000,
+            flags: NcfFlags::empty(),
+            header_len: u64::MAX,
+            schema_offset: 0,
+            index_offset: 0,
+            chunk_count: 0,
+        };
+
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(&header_prefix.encode()).unwrap();
+        file.flush().unwrap();
+
+        assert!(NcfReader::open(&file_path).is_err(), "Expected oversized header to be rejected");
+    }
+
+    #[test]
+    fn test_writer_no_double_allocation() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("writer_single_pass.ncf");
+
+        let metadata = NcfHeader {
+            metadata: Metadata {
+                model_name: "test_writer_no_double_allocation".to_string(),
+                architecture: "test".to_string(),
+                created_at: 0,
+                author: None,
+                license: None,
+                quantization: None,
+                custom: Default::default(),
+            },
+        };
+
+        let mut writer = NcfWriter::new(metadata, NcfFlags::empty());
+        let payload = vec![0u8; 1_048_576];
+
+        for i in 0..50 {
+            let schema = TensorSchema {
+                name: format!("tensor_{:03}", i),
+                dtype: DType::U8,
+                shape: vec![1_048_576],
+                column_layout: Layout::RowMajor,
+                compression: Compression::None,
+                encoding: Encoding::Plain,
+                chunks: Vec::new(),
+            };
+            writer.add_tensor(schema, payload.clone());
+        }
+
+        writer.finalize(&file_path).expect("Failed to finalize NCF file");
+
+        let file_contents = fs::read(&file_path).expect("Failed to read resulting file");
+        let footer_len = u64::from_le_bytes(
+            file_contents[file_contents.len() - 8..]
+                .try_into()
+                .expect("Failed to parse footer length"),
+        );
+
+        let header_prefix = FileHeaderPrefix::decode(&file_contents[..FILE_HEADER_PREFIX_SIZE as usize])
+            .expect("Failed to decode header prefix");
+        let schema_len = header_prefix.index_offset - header_prefix.schema_offset;
+        let index_start = header_prefix.index_offset as usize;
+        let index_end = index_start + footer_len as usize;
+
+        let index: NcfIndex = ciborium::de::from_reader(Cursor::new(&file_contents[index_start..index_end]))
+            .expect("Failed to decode index");
+        assert_eq!(index.entry_count, 50, "Expected 50 index entries");
+
+        assert_eq!(
+            header_prefix.index_offset,
+            header_prefix.schema_offset + schema_len,
+            "Index offset should immediately follow the schema block",
+        );
+
+        let expected_size = header_prefix.index_offset + 16 + footer_len;
+        assert_eq!(
+            file_contents.len() as u64,
+            expected_size,
+            "File size does not match expected serialized NCF size",
+        );
     }
 
     // ============ EDGE CASE SHAPES ============

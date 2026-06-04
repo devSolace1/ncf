@@ -24,16 +24,21 @@ pub struct NcfIndex {
     pub entries: Vec<IndexEntry>,
     /// Mapping from tensor name to primary chunk id.
     pub tensor_map: BTreeMap<String, u64>,
+    /// Mapping from chunk id to index entry for fast lookup.
+    #[serde(skip_serializing, default)]
+    pub chunk_map: BTreeMap<u64, IndexEntry>,
 }
 
 impl NcfIndex {
     /// Construct an index from entries and a tensor map.
     pub fn new(entries: Vec<IndexEntry>, tensor_map: BTreeMap<String, u64>) -> Self {
         let entry_count = entries.len() as u64;
+        let chunk_map = entries.iter().cloned().map(|entry| (entry.chunk_id, entry)).collect();
         Self {
             entry_count,
             entries,
             tensor_map,
+            chunk_map,
         }
     }
 

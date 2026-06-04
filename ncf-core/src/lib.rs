@@ -35,13 +35,13 @@ pub mod constants {
     pub const CHUNK_OVERHEAD: u64 = CHUNK_HEADER_SIZE + CHUNK_CHECKSUM_SIZE;
 
     /// Maximum allowed CBOR header size, preventing unbounded allocations.
-    pub const MAX_HEADER_SIZE: u64 = 16 * 1024 * 1024;
+    pub const MAX_HEADER_SIZE: u64 = 64 * 1024 * 1024;
 
     /// Maximum allowed schema block size.
-    pub const MAX_SCHEMA_SIZE: u64 = 64 * 1024 * 1024;
+    pub const MAX_SCHEMA_SIZE: u64 = 256 * 1024 * 1024;
 
     /// Maximum allowed index block size.
-    pub const MAX_INDEX_SIZE: u64 = 64 * 1024 * 1024;
+    pub const MAX_INDEX_SIZE: u64 = 128 * 1024 * 1024;
 }
 
 /// Common result type returned by NCF core APIs.
