@@ -111,6 +111,12 @@ impl KvcacheReader {
         unsafe { &*atomic_ptr }
     }
 
+    fn commit_epoch_ptr(&self) -> &AtomicU64 {
+        let ptr = self.borrow_owner().as_ptr();
+        let atomic_ptr = unsafe { ptr.add(32) as *const AtomicU64 };
+        unsafe { &*atomic_ptr }
+    }
+
     /// Return the currently visible valid token count.
     pub fn valid_token_count(&self) -> u64 {
         self.header_atomic_ptr().load(Ordering::Acquire)
@@ -124,6 +130,11 @@ impl KvcacheReader {
     /// Return a read-only reference to the parsed cache header.
     pub fn header(&self) -> &KvCacheHeader {
         &self.borrow_dependent().header
+    }
+
+    /// Return the current commit epoch embedded in the header.
+    pub fn commit_epoch(&self) -> u64 {
+        self.commit_epoch_ptr().load(Ordering::Acquire)
     }
 
     /// Return the parsed CBOR metadata block.

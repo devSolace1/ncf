@@ -46,6 +46,7 @@ impl ColumnBuffer {
 
 struct FlushBatch {
     block_idx: u64,
+    batch_epoch: u64,
     token_count: u32,
     entries: Vec<ChunkIndexEntry>,
     payloads: Vec<Vec<u8>>,
@@ -128,6 +129,12 @@ impl KvCacheWriter {
         })
     }
 
+    fn get_header_epoch(&self) -> &AtomicU64 {
+        let ptr = self.header_mmap.as_ptr();
+        let atomic_ptr = unsafe { ptr.add(32) as *const AtomicU64 };
+        unsafe { &*atomic_ptr }
+    }
+
     fn get_header_atomic(&self) -> &AtomicU64 {
         let ptr = self.header_mmap.as_ptr();
         let atomic_ptr = unsafe { ptr.add(40) as *const AtomicU64 };
@@ -137,6 +144,12 @@ impl KvCacheWriter {
     fn update_valid_token_count(&self, count: u64) -> Result<()> {
         let atomic = self.get_header_atomic();
         atomic.store(count, Ordering::Release);
+        Ok(())
+    }
+
+    fn update_commit_epoch(&self, next_epoch: u64) -> Result<()> {
+        let atomic = self.get_header_epoch();
+        atomic.store(next_epoch, Ordering::Release);
         Ok(())
     }
 
@@ -198,10 +211,16 @@ impl KvCacheWriter {
         let header_file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut header_map = unsafe { MmapMut::map_mut(&header_file)? };
         let mut header = KvCacheHeader::decode(&header_map[..KVCACHE_HEADER_SIZE])?;
-        header.index_head_offset = index_offset;
-        header.valid_token_count = header.valid_token_count.saturating_add(batch.token_count as u64);
-        header_map[..KVCACHE_HEADER_SIZE].copy_from_slice(&header.encode());
-        header_map.flush_async()?;
+        let current_epoch = unsafe { &*(header_map.as_ptr().add(32) as *const AtomicU64) }
+            .load(Ordering::Acquire);
+
+        if batch.batch_epoch == current_epoch {
+            header.index_head_offset = index_offset;
+            header.valid_token_count = header.valid_token_count.saturating_add(batch.token_count as u64);
+            header_map[..KVCACHE_HEADER_SIZE].copy_from_slice(&header.encode());
+            header_map.flush_async()?;
+        }
+
         Ok(())
     }
 
@@ -240,6 +259,11 @@ impl KvCacheWriter {
         self.get_header_atomic().load(Ordering::Acquire)
     }
 
+    /// Read the current commit epoch from the mmap header.
+    pub fn commit_epoch(&self) -> u64 {
+        self.get_header_epoch().load(Ordering::Acquire)
+    }
+
     fn flush_block(&mut self, final_block: bool) -> Result<()> {
         let token_count = self.buffers[0].token_count;
         if token_count == 0 {
@@ -269,6 +293,7 @@ impl KvCacheWriter {
 
         let batch = FlushBatch {
             block_idx: self.pending_block_idx,
+            batch_epoch: self.get_header_epoch().load(Ordering::Acquire),
             token_count,
             entries,
             payloads,
@@ -315,13 +340,51 @@ impl KvCacheWriter {
             )));
         }
 
+        let next_epoch = self
+            .get_header_epoch()
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.update_commit_epoch(next_epoch)?;
+
+        let committed = self.get_header_atomic().load(Ordering::Acquire);
+        if count <= committed {
+            self.current_token_count = count;
+            return self.update_valid_token_count(count);
+        }
+
+        let token_bytes = self.config.element_bytes as usize;
+        let pending_count = self.current_token_count.checked_sub(committed).ok_or_else(|| {
+            KvcacheError::Overflow("pending token count underflow".into())
+        })?;
+        let keep_pending = count.checked_sub(committed).ok_or_else(|| {
+            KvcacheError::Overflow("keep pending count underflow".into())
+        })?;
+        let drop_tokens = pending_count.checked_sub(keep_pending).ok_or_else(|| {
+            KvcacheError::Overflow("drop token count underflow".into())
+        })?;
+
+        let new_buffer_count = self.buffers[0]
+            .token_count
+            .checked_sub(drop_tokens as u32)
+            .ok_or_else(|| KvcacheError::Overflow("buffer truncate underflow".into()))?;
+
+        for buffer in &mut self.buffers {
+            buffer.token_count = new_buffer_count;
+            buffer.data.truncate(new_buffer_count as usize * token_bytes);
+        }
+
         self.current_token_count = count;
-        self.update_valid_token_count(count)
+        Ok(())
     }
 
     /// Return the current local token count that has been appended.
     pub fn local_token_count(&self) -> u64 {
         self.current_token_count
+    }
+
+    /// Return the committed token count visible to readers.
+    pub fn committed_token_count(&self) -> u64 {
+        self.get_header_atomic().load(Ordering::Acquire)
     }
 }
 

@@ -67,14 +67,14 @@ pub struct KvCacheHeader {
     pub heads: u32,
     /// Bytes per element.
     pub element_bytes: u32,
-    /// Length of the CBOR metadata block.
-    pub metadata_len: u32,
-    /// Reserved 32-bit padding to align the atomic counter.
-    pub reserved0: u32,
+    /// Commit epoch used to reject stale pending flushes.
+    pub commit_epoch: u64,
     /// Atomic valid token count for reader bounds enforcement.
     pub valid_token_count: u64,
     /// Offset of the latest index trailer.
     pub index_head_offset: u64,
+    /// Length of the CBOR metadata block.
+    pub metadata_len: u32,
     /// Final padding to align the header to 64 bytes.
     pub reserved1: u32,
 }
@@ -90,7 +90,7 @@ impl KvCacheHeader {
             layers: config.layers,
             heads: config.heads,
             element_bytes: config.element_bytes,
-            reserved0: 0,
+            commit_epoch: 0,
             valid_token_count: 0,
             index_head_offset: 0,
             metadata_len,
@@ -108,11 +108,11 @@ impl KvCacheHeader {
         bytes[20..24].copy_from_slice(&self.layers.to_le_bytes());
         bytes[24..28].copy_from_slice(&self.heads.to_le_bytes());
         bytes[28..32].copy_from_slice(&self.element_bytes.to_le_bytes());
-        bytes[32..36].copy_from_slice(&self.metadata_len.to_le_bytes());
-        bytes[36..40].copy_from_slice(&self.reserved0.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.commit_epoch.to_le_bytes());
         bytes[40..48].copy_from_slice(&self.valid_token_count.to_le_bytes());
         bytes[48..56].copy_from_slice(&self.index_head_offset.to_le_bytes());
-        bytes[56..60].copy_from_slice(&self.reserved1.to_le_bytes());
+        bytes[56..60].copy_from_slice(&self.metadata_len.to_le_bytes());
+        bytes[60..64].copy_from_slice(&self.reserved1.to_le_bytes());
         bytes
     }
 
@@ -150,11 +150,8 @@ impl KvCacheHeader {
         let element_bytes = u32::from_le_bytes(bytes[28..32].try_into().map_err(|_| {
             crate::error::KvcacheError::Layout("invalid element size".into())
         })?);
-        let metadata_len = u32::from_le_bytes(bytes[32..36].try_into().map_err(|_| {
-            crate::error::KvcacheError::Layout("invalid metadata length".into())
-        })?);
-        let reserved0 = u32::from_le_bytes(bytes[36..40].try_into().map_err(|_| {
-            crate::error::KvcacheError::Layout("invalid reserved field".into())
+        let commit_epoch = u64::from_le_bytes(bytes[32..40].try_into().map_err(|_| {
+            crate::error::KvcacheError::Layout("invalid commit epoch".into())
         })?);
         let valid_token_count = u64::from_le_bytes(bytes[40..48].try_into().map_err(|_| {
             crate::error::KvcacheError::Layout("invalid token count".into())
@@ -162,7 +159,10 @@ impl KvCacheHeader {
         let index_head_offset = u64::from_le_bytes(bytes[48..56].try_into().map_err(|_| {
             crate::error::KvcacheError::Layout("invalid index offset".into())
         })?);
-        let reserved1 = u32::from_le_bytes(bytes[56..60].try_into().map_err(|_| {
+        let metadata_len = u32::from_le_bytes(bytes[56..60].try_into().map_err(|_| {
+            crate::error::KvcacheError::Layout("invalid metadata length".into())
+        })?);
+        let reserved1 = u32::from_le_bytes(bytes[60..64].try_into().map_err(|_| {
             crate::error::KvcacheError::Layout("invalid reserved field".into())
         })?);
 
@@ -174,7 +174,7 @@ impl KvCacheHeader {
             layers,
             heads,
             element_bytes,
-            reserved0,
+            commit_epoch,
             valid_token_count,
             index_head_offset,
             metadata_len,
