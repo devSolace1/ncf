@@ -7,14 +7,20 @@ pub mod mmap;
 pub mod reader;
 /// File writer utilities to create NCF files.
 pub mod writer;
-/// Streaming API placeholder (hidden until implemented).
+/// Streaming API placeholder (hidden until implemented.
 pub mod stream;
+
+#[cfg(feature = "http")]
+/// HTTP-backed access for remote NCF files.
+pub mod http_reader;
 
 pub use mmap::NcfMmap;
 pub use reader::NcfReader;
 pub use writer::NcfWriter;
 #[doc(hidden)]
 pub use stream::NcfStream;
+#[cfg(feature = "http")]
+pub use http_reader::NcfHttpReader;
 
 #[cfg(test)]
 mod roundtrip_tests;

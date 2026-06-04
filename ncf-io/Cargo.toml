@@ -35,6 +35,11 @@ name = "ncf_performance"
 harness = false
 path = "benches/ncf_performance.rs"
 
+[[bench]]
+name = "http_performance"
+harness = false
+path = "benches/http_performance.rs"
+
 [features]
 streaming = ["tokio", "futures", "bytes"]
 http = ["reqwest", "streaming"]

@@ -219,13 +219,9 @@ pub mod reader {
         use super::*;
         use tempfile::TempDir;
         use tokio::fs::File as TokioFile;
-        use tokio::io::AsyncReadExt;
 
         use ncf_core::header::Metadata;
-        use ncf_core::schema::{DType, Encoding, Layout, Compression, ChunkRef};
-        use ncf_core::index::NcfIndex;
-        use std::fs::File;
-        use std::io::Write;
+        use ncf_core::schema::{DType, Encoding, Layout, Compression};
 
         #[tokio::test]
         async fn test_stream_metadata_arrives_first() {

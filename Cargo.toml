@@ -7,6 +7,7 @@ members = [
     "ncf-convert",
     "ncf-py",
     "fuzz",
+    "ncf-kvcache",
 ]
 
 [workspace.dependencies]
