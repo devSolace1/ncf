@@ -16,6 +16,10 @@ self_cell = "1.2.2"
 zstd = "0.11"
 lz4_flex = "0.13"
 snap = "1.1"
+bytes = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["io-util", "fs"], optional = true }
+reqwest = { version = "0.12", features = ["stream"], optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -24,8 +28,13 @@ rand_chacha = "0.3"
 rayon = "1.7"
 safetensors = "0.7"
 tempfile = "3"
+wiremock = "0.6"
 
 [[bench]]
 name = "ncf_performance"
 harness = false
 path = "benches/ncf_performance.rs"
+
+[features]
+streaming = ["tokio", "futures", "bytes"]
+http = ["reqwest", "streaming"]
