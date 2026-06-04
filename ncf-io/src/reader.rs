@@ -1,18 +1,21 @@
 use memmap2::Mmap;
+use ciborium::de::from_reader;
+use lz4_flex::decompress_size_prepended;
+use ncf_core::chunk::{ChunkHeader, CHUNK_CHECKSUM_SIZE, CHUNK_HEADER_SIZE};
 use ncf_core::header::{FileHeaderPrefix, NcfHeader};
 use ncf_core::index::IndexEntry;
-use ncf_core::schema::TensorSchema;
+use ncf_core::schema::{Compression, TensorSchema};
 use ncf_core::constants::*;
 use ncf_core::Result;
-use once_cell::sync::OnceCell;
 use self_cell::self_cell;
 use serde::Deserialize;
-use serde_cbor::de::Deserializer as CborDeserializer;
+use snap::raw::Decoder as SnappyDecoder;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{Cursor, ErrorKind};
 use std::path::Path;
+use std::sync::OnceLock;
 
 #[derive(Debug)]
 /// Borrowed view of an NCF index decoded from the file.
@@ -48,7 +51,7 @@ pub struct NcfReaderData<'this> {
     /// Parsed header metadata.
     pub metadata: NcfHeader,
     /// Lazily-initialized schema list.
-    pub schemas: OnceCell<std::result::Result<Vec<TensorSchema>, String>>,
+    pub schemas: OnceLock<std::result::Result<Vec<TensorSchema>, String>>,
     /// Byte range of the schema block within the file.
     pub schema_range: std::ops::Range<usize>,
     /// Borrowed index data referencing the mapped memory.
@@ -75,7 +78,14 @@ impl NcfReader {
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
             
             let header_start = FILE_HEADER_PREFIX_SIZE as usize;
-            let header_end = header_start.checked_add(header_prefix.header_len as usize)
+            let header_len = header_prefix.header_len;
+            if header_len > MAX_HEADER_SIZE {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("header size {} exceeds maximum allowed {}", header_len, MAX_HEADER_SIZE),
+                ));
+            }
+            let header_end = header_start.checked_add(header_len as usize)
                 .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "header size overflow"))?;
             if header_end > mmap.len() {
                 return Err(std::io::Error::new(
@@ -94,6 +104,13 @@ impl NcfReader {
                     ErrorKind::InvalidData,
                     format!("schema block out of bounds: start={}, end={}, file_size={}", 
                         schema_start, schema_end, mmap.len())
+                ));
+            }
+            let schema_len = schema_end.saturating_sub(schema_start) as u64;
+            if schema_len > MAX_SCHEMA_SIZE {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("schema block size {} exceeds maximum allowed {}", schema_len, MAX_SCHEMA_SIZE),
                 ));
             }
             let schema_range = schema_start..schema_end;
@@ -118,7 +135,14 @@ impl NcfReader {
             let footer_len_bytes: [u8; 8] = mmap[footer_position + 8..footer_position + 16]
                 .try_into()
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid footer length"))?;
-            let index_len = u64::from_le_bytes(footer_len_bytes) as usize;
+            let index_len = u64::from_le_bytes(footer_len_bytes);
+            if index_len > MAX_INDEX_SIZE {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("index size {} exceeds maximum allowed {}", index_len, MAX_INDEX_SIZE),
+                ));
+            }
+            let index_len = index_len as usize;
             let index_start = header_prefix.index_offset as usize;
             let index_end = index_start.checked_add(index_len)
                 .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "index size overflow"))?;
@@ -130,8 +154,7 @@ impl NcfReader {
                 ));
             }
 
-            let mut index_de = CborDeserializer::from_slice(&mmap[index_start..index_end]);
-            let raw_index: RawBorrowedNcfIndex<'_> = Deserialize::deserialize(&mut index_de)
+            let raw_index: RawBorrowedNcfIndex<'_> = from_reader(Cursor::new(&mmap[index_start..index_end]))
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
             let mut tensor_map = HashMap::with_capacity(raw_index.tensor_map.len());
             for (name, chunk_id) in raw_index.tensor_map {
@@ -220,8 +243,7 @@ impl NcfReader {
         self.with_dependent(|owner, data| {
             let schemas_cell = data.schemas.get_or_init(|| {
                 let schema_bytes = &owner[data.schema_range.clone()];
-                let mut schema_de = CborDeserializer::from_slice(schema_bytes);
-                Deserialize::deserialize(&mut schema_de).map_err(|err| err.to_string())
+                from_reader(Cursor::new(schema_bytes)).map_err(|err| err.to_string())
             });
 
             match schemas_cell.as_ref() {
@@ -240,49 +262,89 @@ impl NcfReader {
 
         let data = self.borrow_owner();
         let mut result = Vec::new();
-        
+
         for chunk in &schema.chunks {
-            // Bounds check: chunk offset is within file
-            let offset_start = (chunk.byte_offset as usize)
+            let header_start = chunk.byte_offset as usize;
+            let header_end = header_start
                 .checked_add(CHUNK_HEADER_SIZE as usize)
-                .ok_or_else(|| {
-                    std::io::Error::new(ErrorKind::InvalidData, "chunk offset overflow")
-                })?;
-            
-            if offset_start > data.len() {
+                .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "chunk header overflow"))?;
+            if header_end > data.len() {
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidData,
-                    format!("chunk offset out of bounds: offset={}, file_size={}", offset_start, data.len())
-                ).into());
+                    format!("chunk header out of bounds: end={}, file_size={}", header_end, data.len()),
+                )
+                .into());
             }
 
-            // Calculate actual data length: total_len - header - checksum
+            let chunk_header = ChunkHeader::decode(&data[header_start..header_end])?;
+            if chunk_header.flags == 0 && schema.compression != Compression::None {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "schema indicates compression but chunk header is uncompressed",
+                )
+                .into());
+            }
+            if chunk_header.flags != 0 && schema.compression == Compression::None {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "chunk header indicates compression but schema is uncompressed",
+                )
+                .into());
+            }
+
+            let offset_start = header_end;
             let chunk_total_len = chunk.byte_len as usize;
             let chunk_overhead = (CHUNK_HEADER_SIZE + CHUNK_CHECKSUM_SIZE) as usize;
-            
             if chunk_total_len < chunk_overhead {
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidData,
-                    format!("chunk size too small: total_len={}, overhead={}", chunk_total_len, chunk_overhead)
-                ).into());
+                    format!("chunk size too small: total_len={}, overhead={}", chunk_total_len, chunk_overhead),
+                )
+                .into());
             }
-            
-            let data_len = chunk_total_len - chunk_overhead;
-            
-            // Bounds check: slice end is within file
-            let offset_end = offset_start.checked_add(data_len)
-                .ok_or_else(|| {
-                    std::io::Error::new(ErrorKind::InvalidData, "chunk data size overflow")
-                })?;
-            
+
+            let payload_len = chunk_total_len - chunk_overhead;
+            let offset_end = offset_start.checked_add(payload_len).ok_or_else(|| {
+                std::io::Error::new(ErrorKind::InvalidData, "chunk payload size overflow")
+            })?;
             if offset_end > data.len() {
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidData,
-                    format!("chunk data out of bounds: end={}, file_size={}", offset_end, data.len())
-                ).into());
+                    format!("chunk payload out of bounds: end={}, file_size={}", offset_end, data.len()),
+                )
+                .into());
             }
-            
-            result.extend_from_slice(&data[offset_start..offset_end]);
+
+            let chunk_payload = &data[offset_start..offset_end];
+            let decompressed = match schema.compression {
+                Compression::None => chunk_payload.to_vec(),
+                Compression::Zstd(_) => zstd::decode_all(chunk_payload).map_err(|err| {
+                    std::io::Error::new(ErrorKind::InvalidData, format!("Zstd decompression failed: {}", err))
+                })?,
+                Compression::Lz4 => decompress_size_prepended(chunk_payload).map_err(|err| {
+                    std::io::Error::new(ErrorKind::InvalidData, format!("LZ4 decompression failed: {}", err))
+                })?,
+                Compression::Snappy => {
+                    let mut decoder = SnappyDecoder::new();
+                    decoder.decompress_vec(chunk_payload).map_err(|err| {
+                        std::io::Error::new(ErrorKind::InvalidData, format!("Snappy decompression failed: {}", err))
+                    })?
+                }
+            };
+
+            if decompressed.len() as u64 != chunk_header.uncompressed_len {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "decompressed chunk size mismatch: expected {}, got {}",
+                        chunk_header.uncompressed_len,
+                        decompressed.len()
+                    ),
+                )
+                .into());
+            }
+
+            result.extend_from_slice(&decompressed);
         }
         Ok(Some(result))
     }

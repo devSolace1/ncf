@@ -34,10 +34,18 @@ impl ChunkHeader {
         if &bytes[..4] != CHUNK_MAGIC {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid chunk magic"));
         }
-        let chunk_id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
-        let flags = u16::from_le_bytes(bytes[12..14].try_into().unwrap());
-        let uncompressed_len = u64::from_le_bytes(bytes[14..22].try_into().unwrap());
-        let compressed_len = u64::from_le_bytes(bytes[22..30].try_into().unwrap());
+        let chunk_id = u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid chunk header chunk_id")
+        })?);
+        let flags = u16::from_le_bytes(bytes[12..14].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid chunk header flags")
+        })?);
+        let uncompressed_len = u64::from_le_bytes(bytes[14..22].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid chunk header uncompressed_len")
+        })?);
+        let compressed_len = u64::from_le_bytes(bytes[22..30].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid chunk header compressed_len")
+        })?);
         Ok(Self {
             chunk_id,
             flags,

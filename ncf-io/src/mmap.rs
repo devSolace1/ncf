@@ -41,8 +41,15 @@ impl NcfMmap {
         let header_prefix = FileHeaderPrefix::decode(&mmap[..FILE_HEADER_PREFIX_SIZE as usize])?;
         
         // Bounds check: header block
+        let header_len = header_prefix.header_len;
+        if header_len > MAX_HEADER_SIZE {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("header size {} exceeds maximum allowed {}", header_len, MAX_HEADER_SIZE),
+            ).into());
+        }
         let header_start = FILE_HEADER_PREFIX_SIZE as usize;
-        let header_end = header_start.checked_add(header_prefix.header_len as usize)
+        let header_end = header_start.checked_add(header_len as usize)
             .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "header size overflow"))?;
         if header_end > mmap.len() {
             return Err(std::io::Error::new(
@@ -61,6 +68,13 @@ impl NcfMmap {
                 ErrorKind::InvalidData,
                 format!("schema block out of bounds: start={}, end={}, file_size={}", 
                     schema_start, schema_end, mmap.len())
+            ).into());
+        }
+        let schema_len = schema_end.saturating_sub(schema_start) as u64;
+        if schema_len > MAX_SCHEMA_SIZE {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("schema block size {} exceeds maximum allowed {}", schema_len, MAX_SCHEMA_SIZE),
             ).into());
         }
         let schema_range = schema_start..schema_end;
@@ -86,7 +100,14 @@ impl NcfMmap {
         let footer_len_bytes: [u8; 8] = mmap[footer_position + 8..footer_position + 16]
             .try_into()
             .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "invalid footer length"))?;
-        let index_len = u64::from_le_bytes(footer_len_bytes) as usize;
+        let index_len = u64::from_le_bytes(footer_len_bytes);
+        if index_len > MAX_INDEX_SIZE {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("index size {} exceeds maximum allowed {}", index_len, MAX_INDEX_SIZE),
+            ).into());
+        }
+        let index_len = index_len as usize;
         
         // Bounds check: index block
         let index_start = header_prefix.index_offset as usize;

@@ -58,7 +58,7 @@ jobs:
 
       - name: Run benchmark suite
         run: |
-          cargo bench -q --bench ncf_performance --profile release -- --output-format bencher --noplot --warm-up-time 5 --measurement-time 30 --confidence-level 0.99 | tee benchmark-output.txt
+          cargo bench -p ncf-io -q --bench ncf_performance --profile release -- --output-format bencher --noplot --warm-up-time 5 --measurement-time 30 --confidence-level 0.99 | tee benchmark-output.txt
 
       - name: Cache benchmark data
         uses: actions/cache@v4

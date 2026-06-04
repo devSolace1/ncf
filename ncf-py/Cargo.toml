@@ -10,5 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
 anyhow = "1.0"
+numpy = "0.20"
 ncf-core = { path = "../ncf-core" }
 ncf-io = { path = "../ncf-io" }

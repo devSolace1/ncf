@@ -138,12 +138,12 @@ impl FileHeaderPrefix {
         if &magic != NCF_MAGIC {
             return Err(NcfError::Header("Invalid magic bytes".into()));
         }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let flags = NcfFlags::from_bits_truncate(u32::from_le_bytes(bytes[12..16].try_into().unwrap()));
-        let header_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        let schema_offset = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
-        let index_offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
-        let chunk_count = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let version = u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| NcfError::Header("Invalid header version".into()))?);
+        let flags = NcfFlags::from_bits_truncate(u32::from_le_bytes(bytes[12..16].try_into().map_err(|_| NcfError::Header("Invalid header flags".into()))?));
+        let header_len = u64::from_le_bytes(bytes[16..24].try_into().map_err(|_| NcfError::Header("Invalid header length".into()))?);
+        let schema_offset = u64::from_le_bytes(bytes[24..32].try_into().map_err(|_| NcfError::Header("Invalid schema offset".into()))?);
+        let index_offset = u64::from_le_bytes(bytes[32..40].try_into().map_err(|_| NcfError::Header("Invalid index offset".into()))?);
+        let chunk_count = u64::from_le_bytes(bytes[40..48].try_into().map_err(|_| NcfError::Header("Invalid chunk count".into()))?);
         Ok(Self {
             magic,
             version,

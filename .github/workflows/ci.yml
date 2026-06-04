@@ -11,6 +11,9 @@ jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [ncf-core, ncf-io, ncf-convert, ncf-cli, ncf-py]
 
     steps:
       - name: Checkout repository
@@ -32,6 +35,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run cargo tests
+      - name: Run tests for package
         run: |
-          cargo test --all --workspace --quiet
+          cargo test -p ${{ matrix.package }} --quiet

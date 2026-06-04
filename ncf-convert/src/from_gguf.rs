@@ -59,8 +59,13 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Option<&st
     offsets.sort_unstable();
 
     for tensor in &archive.tensors {
-        let offset_index = offsets.iter().position(|&o| o == tensor.offset).unwrap();
-        let next_offset = offsets[offset_index + 1] as usize;
+        let offset_index = offsets
+            .iter()
+            .position(|&o| o == tensor.offset)
+            .ok_or_else(|| anyhow::anyhow!("invalid tensor offset: {}", tensor.offset))?;
+        let next_offset = offsets.get(offset_index + 1).copied().ok_or_else(|| {
+            anyhow::anyhow!("missing end offset for tensor '{}'", tensor.name)
+        })? as usize;
         let start = tensor.offset as usize;
         let end = next_offset;
         let payload = data[start..end].to_vec();
