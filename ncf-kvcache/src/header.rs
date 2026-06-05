@@ -199,8 +199,8 @@ impl KvCacheMetadata {
     /// Convert NCF header metadata into the cache metadata structure.
     pub fn from_ncf_header(metadata: &Metadata) -> Self {
         Self {
-            model_name: metadata.model_name.clone(),
-            architecture: Some(metadata.architecture.clone()),
+            model_name: metadata.model_name.to_owned(),
+            architecture: Some(metadata.architecture.to_owned()),
             custom: metadata.custom.clone(),
         }
     }

@@ -2,7 +2,7 @@ use crate::schema::TensorSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 /// Single entry in the index describing a chunk's location.
 pub struct IndexEntry {
     /// Chunk identifier.

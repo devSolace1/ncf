@@ -165,7 +165,8 @@ impl NcfReader {
 
             let mut chunk_map = BTreeMap::new();
             for entry in &raw_index.entries {
-                chunk_map.insert(entry.chunk_id, entry.clone());
+                // IndexEntry is Copy; this is now optimized to a simple copy
+                chunk_map.insert(entry.chunk_id, *entry);
             }
 
             let index = BorrowedNcfIndex {

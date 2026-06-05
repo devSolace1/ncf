@@ -13,14 +13,15 @@ pub fn safetensors_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Opt
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     let archive = SafeTensors::deserialize(&data)?;
-    let arch = architecture.map(|s| s.to_string()).unwrap_or_else(|| "safetensors-converted".to_string());
+    // Avoid double string allocation with unwrap_or_else - use unwrap_or directly
+    let arch = architecture.unwrap_or("safetensors-converted").to_string();
     let mut writer = NcfWriter::new(
         NcfHeader {
             metadata: Metadata {
                 model_name: input.as_ref().file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 architecture: arch,
                 created_at: chrono::Utc::now().timestamp() as u64,
-                author: author.map(|s| s.to_string()),
+                author: author.map(|s| s.to_owned()),
                 license: None,
                 quantization: None,
                 custom: BTreeMap::new(),
@@ -43,7 +44,7 @@ pub fn safetensors_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Opt
         };
         let payload = tensor.data().to_owned();
         let schema = TensorSchema {
-            name: name.to_string(),
+            name: name.to_owned(),
             dtype,
             shape,
             column_layout: Layout::RowMajor,

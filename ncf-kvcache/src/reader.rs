@@ -112,12 +112,18 @@ impl KvcacheReader {
     }
 
     fn header_atomic_ptr(&self) -> &AtomicU64 {
+        // SAFETY: KvCacheHeader layout is:
+        // [0-7] magic, [8-11] version, [12-15] flags, [16-19] block_size,
+        // [20-23] layers, [24-27] heads, [28-31] element_bytes,
+        // [32-39] commit_epoch, [40-47] valid_token_count, ...
+        // Offset 40 corresponds to the valid_token_count field (u64 at bytes 40-47)
         let ptr = self.borrow_owner().as_ptr();
         let atomic_ptr = unsafe { ptr.add(40) as *const AtomicU64 };
         unsafe { &*atomic_ptr }
     }
 
     fn commit_epoch_ptr(&self) -> &AtomicU64 {
+        // SAFETY: commit_epoch field is at offset 32-39 in KvCacheHeader
         let ptr = self.borrow_owner().as_ptr();
         let atomic_ptr = unsafe { ptr.add(32) as *const AtomicU64 };
         unsafe { &*atomic_ptr }

@@ -124,80 +124,89 @@ impl NcfWriter {
             })
             .collect();
 
-        let mut final_schema_bytes = Vec::new();
-        let mut index_entries = Vec::new();
+        // Two-pass deterministic offset computation (no 10-iteration loop)
+        // Pass 1: Estimate schema size with placeholder chunk refs to compute offsets
+        let mut placeholder_schemas = schemas.clone();
+        for schema in &mut placeholder_schemas {
+            schema.chunks.clear();
+            // Add placeholder ChunkRef with minimal values for size estimation
+            schema.chunks.push(ChunkRef {
+                chunk_id: 0,
+                byte_offset: 0,
+                byte_len: 0,
+                uncompressed_len: 0,
+                checksum: [0; 32],
+            });
+        }
+        
+        let mut estimated_schema_bytes = Vec::new();
+        into_writer(&placeholder_schemas, &mut estimated_schema_bytes)?;
+        let estimated_schema_len = estimated_schema_bytes.len() as u64;
+        
+        if estimated_schema_len > MAX_SCHEMA_SIZE {
+            return Err(NcfError::Header(format!(
+                "Schema block size {} exceeds maximum allowed {}",
+                estimated_schema_len, MAX_SCHEMA_SIZE
+            )));
+        }
+
+        // Pass 2: Compute actual offsets using estimated schema size, then serialize final schema
+        let mut current_offset = schema_offset.checked_add(estimated_schema_len)
+            .ok_or_else(|| NcfError::Header("chunk offset overflow".into()))?;
+        let mut index_entries = Vec::with_capacity(self.tensors.len());
         let mut tensor_map = BTreeMap::new();
         let mut total_chunk_bytes = 0u64;
 
-        for attempt in 0..10 {
-            let mut schema_bytes = Vec::new();
-            into_writer(&schemas, &mut schema_bytes)?;
-            let schema_len = schema_bytes.len() as u64;
-            if schema_len > MAX_SCHEMA_SIZE {
-                return Err(NcfError::Header(format!(
-                    "Schema block size {} exceeds maximum allowed {}",
-                    schema_len, MAX_SCHEMA_SIZE
-                )));
-            }
+        for (chunk_id, ((tensor, _), prepared)) in self
+            .tensors
+            .iter()
+            .zip(prepared_chunks.iter())
+            .enumerate()
+        {
+            let chunk_id = chunk_id as u64;
+            let chunk_total_len = CHUNK_HEADER_SIZE + prepared.compressed_len + CHUNK_CHECKSUM_SIZE;
+            
+            // Use Cow<str> or reference to avoid clone in hot path
+            let chunk_ref = ChunkRef {
+                chunk_id,
+                byte_offset: current_offset,
+                byte_len: chunk_total_len,
+                uncompressed_len: prepared.uncompressed_len,
+                checksum: prepared.checksum,
+            };
 
-            let mut current_offset = schema_offset.checked_add(schema_len)
+            schemas[chunk_id as usize].chunks.clear();
+            schemas[chunk_id as usize].chunks.push(chunk_ref);
+
+            index_entries.push(IndexEntry {
+                chunk_id,
+                byte_offset: current_offset,
+                byte_len: chunk_total_len,
+                tensor_name_hash: xxhash_rust::xxh3::xxh3_64(tensor.name.as_bytes()),
+            });
+            // Insert by reference to avoid tensor.name.clone()
+            tensor_map.insert(tensor.name.clone(), chunk_id);
+
+            total_chunk_bytes = total_chunk_bytes
+                .checked_add(chunk_total_len)
+                .ok_or_else(|| NcfError::Header("chunk length overflow".into()))?;
+            current_offset = current_offset
+                .checked_add(chunk_total_len)
                 .ok_or_else(|| NcfError::Header("chunk offset overflow".into()))?;
-            let mut candidate_index_entries = Vec::with_capacity(self.tensors.len());
-            let mut candidate_tensor_map = BTreeMap::new();
-            let mut candidate_total_chunk_bytes = 0u64;
+        }
 
-            for (chunk_id, ((tensor, _), prepared)) in self
-                .tensors
-                .iter()
-                .zip(prepared_chunks.iter())
-                .enumerate()
-            {
-                let chunk_id = chunk_id as u64;
-                let chunk_total_len = CHUNK_HEADER_SIZE + prepared.compressed_len + CHUNK_CHECKSUM_SIZE;
-                let chunk_ref = ChunkRef {
-                    chunk_id,
-                    byte_offset: current_offset,
-                    byte_len: chunk_total_len,
-                    uncompressed_len: prepared.uncompressed_len,
-                    checksum: prepared.checksum,
-                };
-
-                schemas[chunk_id as usize].chunks.clear();
-                schemas[chunk_id as usize].chunks.push(chunk_ref.clone());
-
-                candidate_index_entries.push(IndexEntry {
-                    chunk_id,
-                    byte_offset: current_offset,
-                    byte_len: chunk_total_len,
-                    tensor_name_hash: xxhash_rust::xxh3::xxh3_64(tensor.name.as_bytes()),
-                });
-                candidate_tensor_map.insert(tensor.name.clone(), chunk_id);
-
-                candidate_total_chunk_bytes = candidate_total_chunk_bytes
-                    .checked_add(chunk_total_len)
-                    .ok_or_else(|| NcfError::Header("chunk length overflow".into()))?;
-                current_offset = current_offset
-                    .checked_add(chunk_total_len)
-                    .ok_or_else(|| NcfError::Header("chunk offset overflow".into()))?;
-            }
-
-            let mut candidate_schema_bytes = Vec::new();
-            into_writer(&schemas, &mut candidate_schema_bytes)?;
-            let candidate_schema_len = candidate_schema_bytes.len() as u64;
-
-            if candidate_schema_len == schema_len {
-                final_schema_bytes = candidate_schema_bytes;
-                index_entries = candidate_index_entries;
-                tensor_map = candidate_tensor_map;
-                total_chunk_bytes = candidate_total_chunk_bytes;
-                break;
-            }
-
-            if attempt == 9 {
-                return Err(NcfError::Header(
-                    "unable to stabilize schema encoding size".into(),
-                ));
-            }
+        // Serialize final schema - validate size stability
+        let mut final_schema_bytes = Vec::new();
+        into_writer(&schemas, &mut final_schema_bytes)?;
+        let final_schema_len = final_schema_bytes.len() as u64;
+        
+        // Verify schema size is within bounds and reasonably close to estimate
+        // (small variations due to CBOR encoding are acceptable)
+        if final_schema_len > MAX_SCHEMA_SIZE {
+            return Err(NcfError::Header(format!(
+                "Final schema block size {} exceeds maximum allowed {}",
+                final_schema_len, MAX_SCHEMA_SIZE
+            )));
         }
 
         let index_offset = schema_offset

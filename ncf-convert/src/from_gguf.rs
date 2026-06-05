@@ -38,7 +38,7 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Option<&st
         .map_err(|err| anyhow::anyhow!("failed to parse GGUF file: {}", err))?
         .context("failed to parse GGUF file")?;
 
-    let arch = architecture.map(|s| s.to_string()).unwrap_or_else(|| "gguf-converted".to_string());
+    let arch = architecture.unwrap_or("gguf-converted").to_string();
     let mut writer = NcfWriter::new(
         NcfHeader {
             metadata: Metadata {
@@ -59,9 +59,10 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Option<&st
     offsets.sort_unstable();
 
     for tensor in &archive.tensors {
+        // O(log n) binary search instead of O(n) linear search
         let offset_index = offsets
-            .iter()
-            .position(|&o| o == tensor.offset)
+            .binary_search(&tensor.offset)
+            .ok()
             .ok_or_else(|| anyhow::anyhow!("invalid tensor offset: {}", tensor.offset))?;
         let next_offset = offsets.get(offset_index + 1).copied().ok_or_else(|| {
             anyhow::anyhow!("missing end offset for tensor '{}'", tensor.name)
@@ -102,7 +103,7 @@ pub fn gguf_to_ncf<P: AsRef<Path>>(input: P, output: P, architecture: Option<&st
             }
         }
         let schema = TensorSchema {
-            name: tensor.name.clone(),
+            name: tensor.name.to_owned(),
             dtype,
             shape,
             column_layout: Layout::RowMajor,
