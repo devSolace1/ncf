@@ -91,6 +91,8 @@ pub mod reader {
         inner: Box<dyn AsyncRead + Unpin + Send>,
         state: StreamState,
         header_prefix: Option<FileHeaderPrefix>,
+        metadata: Option<NcfHeader>,
+        schemas: Option<Vec<TensorSchema>>,
         requested_tensors: Option<HashSet<String>>,
     }
 
@@ -101,6 +103,8 @@ pub mod reader {
                 inner: Box::new(reader),
                 state: StreamState::AwaitingHeader,
                 header_prefix: None,
+                metadata: None,
+                schemas: None,
                 requested_tensors: None,
             }
         }
@@ -109,6 +113,32 @@ pub mod reader {
         pub fn request_tensors(&mut self, names: &[&str]) {
             let set: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
             self.requested_tensors = Some(set);
+        }
+
+        /// Helper: Get tensor name for a given chunk_id from parsed schemas.
+        /// Returns the tensor name and schema, or a fallback name with a warning log if not found.
+        fn tensor_name_for_chunk(&self, chunk_id: u64) -> (String, Option<TensorSchema>) {
+            if let Some(schemas) = &self.schemas {
+                for schema in schemas {
+                    for chunk_ref in &schema.chunks {
+                        if chunk_ref.chunk_id == chunk_id {
+                            return (schema.name.clone(), Some(schema.clone()));
+                        }
+                    }
+                }
+            }
+            // Fallback: chunk_id not found in any schema
+            eprintln!("WARNING: chunk_id {} not found in any schema, using fallback name", chunk_id);
+            (format!("chunk_{}", chunk_id), None)
+        }
+
+        /// Helper: Check if this chunk is the last chunk for its tensor.
+        fn is_last_chunk_for_tensor(&self, chunk_id: u64, tensor_schema: &TensorSchema) -> bool {
+            if let Some(last_chunk) = tensor_schema.chunks.last() {
+                last_chunk.chunk_id == chunk_id
+            } else {
+                false
+            }
         }
 
         /// Read next chunk from the async reader.
@@ -122,7 +152,7 @@ pub mod reader {
                         self.header_prefix = Some(prefix);
                         self.state = StreamState::AwaitingSchema;
 
-                        // Returning a minimal Metadata event here; full header bytes can be read in the next state.
+                        // Returning a minimal Metadata event here; full header bytes will be read in the next state.
                         return Ok(Some(StreamChunk::Metadata(NcfHeader { metadata: ncf_core::header::Metadata { model_name: String::new(), architecture: String::new(), created_at: 0, author: None, license: None, quantization: None, custom: Default::default() } })));
                     }
 
@@ -137,15 +167,18 @@ pub mod reader {
                         self.inner.read_exact(&mut buf).await.map_err(|e| ncf_core::NcfError::Io(e))?;
 
                         let header_bytes = &buf[..header_len];
-                        let _metadata = NcfHeader::decode_cbor(header_bytes)?;
+                        let metadata = NcfHeader::decode_cbor(header_bytes)?;
+                        self.metadata = Some(metadata.clone());
 
                         let schema_rel_start = schema_start.checked_sub(0).unwrap_or(0);
                         let schema_rel_end = schema_rel_start + (schema_end - schema_start);
                         let schema_bytes = &buf[schema_rel_start..schema_rel_end];
                         let schemas: Vec<TensorSchema> = ciborium::de::from_reader(std::io::Cursor::new(schema_bytes))?;
+                        self.schemas = Some(schemas.clone());
 
                         self.state = StreamState::StreamingChunks;
-                        return Ok(Some(StreamChunk::Schema(schemas)));
+                        // Emit the correct metadata that was just decoded
+                        return Ok(Some(StreamChunk::Metadata(metadata)));
                     }
 
                     StreamState::StreamingChunks => {
@@ -182,7 +215,16 @@ pub mod reader {
                         let computed = blake3::hash(&decompressed);
                         let checksum_valid = computed.as_bytes() == &checksum[..];
 
-                        let name = format!("chunk_{}", chunk_header.chunk_id);
+                        // Get tensor name from schema using helper method
+                        let (name, tensor_schema) = self.tensor_name_for_chunk(chunk_header.chunk_id);
+
+                        // Compute is_last_chunk based on schema
+                        let is_last_chunk = if let Some(schema) = &tensor_schema {
+                            self.is_last_chunk_for_tensor(chunk_header.chunk_id, schema)
+                        } else {
+                            false
+                        };
+
                         let emit = match &self.requested_tensors {
                             Some(set) => {
                                 if self.header_prefix.as_ref().map(|p| p.flags.contains(NcfFlags::STREAMING_SAFE)).unwrap_or(false) {
@@ -194,15 +236,12 @@ pub mod reader {
                             None => true,
                         };
 
-                        // Placeholder: NCF writer currently does not expose per-chunk last flags in this reader.
-                        let is_last = false;
-
                         if emit {
                             return Ok(Some(StreamChunk::TensorData {
                                 name,
                                 chunk_id: chunk_header.chunk_id,
                                 data: Bytes::from(decompressed),
-                                is_last_chunk: is_last,
+                                is_last_chunk,
                                 checksum_valid,
                             }));
                         }

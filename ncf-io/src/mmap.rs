@@ -18,6 +18,7 @@ pub struct NcfMmap {
     /// Decoded CBOR header metadata.
     pub metadata: ncf_core::header::NcfHeader,
     schemas: OnceLock<std::result::Result<Vec<TensorSchema>, String>>,
+    schema_map: OnceLock<std::collections::BTreeMap<String, usize>>,
     schema_range: std::ops::Range<usize>,
     /// Parsed index information.
     pub index: NcfIndex,
@@ -130,6 +131,7 @@ impl NcfMmap {
             header_prefix,
             metadata,
             schemas: OnceLock::new(),
+            schema_map: OnceLock::new(),
             schema_range,
             index,
         })
@@ -143,7 +145,17 @@ impl NcfMmap {
         });
 
         match schemas.as_ref() {
-            Ok(schemas) => Ok(schemas.as_slice()),
+            Ok(schemas) => {
+                // Build schema_map on first access for O(log n) lookups
+                self.schema_map.get_or_init(|| {
+                    let mut map = std::collections::BTreeMap::new();
+                    for (idx, schema) in schemas.iter().enumerate() {
+                        map.insert(schema.name.clone(), idx);
+                    }
+                    map
+                });
+                Ok(schemas.as_slice())
+            }
             Err(err) => Err(ncf_core::NcfError::Header(err.clone())),
         }
     }

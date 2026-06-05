@@ -54,6 +54,8 @@ pub struct NcfReaderData<'this> {
     pub metadata: NcfHeader,
     /// Lazily-initialized schema list.
     pub schemas: OnceLock<std::result::Result<Vec<TensorSchema>, String>>,
+    /// Lazily-initialized schema name -> index mapping for O(log n) lookup.
+    pub schema_map: OnceLock<BTreeMap<String, usize>>,
     /// Byte range of the schema block within the file.
     pub schema_range: std::ops::Range<usize>,
     /// Borrowed index data referencing the mapped memory.
@@ -176,6 +178,7 @@ impl NcfReader {
             Ok(NcfReaderData {
                 metadata,
                 schemas: OnceLock::new(),
+                schema_map: OnceLock::new(),
                 schema_range,
                 index,
                 header_prefix,
@@ -198,9 +201,23 @@ impl NcfReader {
         Ok(())
     }
 
-    /// Find a tensor schema by name.
+    /// Find a tensor schema by name using O(log n) lookup.
+    ///
+    /// Uses the indexed schema_map for efficient lookup instead of linear scan.
     pub fn find_schema(&self, name: &str) -> Result<Option<&TensorSchema>> {
-        Ok(self.schemas()?.iter().find(|schema| schema.name == name))
+        // Ensure schemas are loaded, which also initializes schema_map
+        let schemas = self.schemas()?;
+        
+        self.with_dependent(|_owner, data| {
+            // schema_map is guaranteed to exist after schemas() call
+            let schema_map = data.schema_map.get()
+                .expect("schema_map should be initialized after schemas() call");
+            
+            match schema_map.get(name) {
+                Some(&idx) => Ok(Some(&schemas[idx])),
+                None => Ok(None),
+            }
+        })
     }
 
     /// Return the decoded NCF header metadata.
@@ -376,7 +393,17 @@ impl NcfReader {
             });
 
             match schemas_cell.as_ref() {
-                Ok(schemas) => Ok(schemas.as_slice()),
+                Ok(schemas) => {
+                    // Build schema_map on first access for O(log n) lookups
+                    data.schema_map.get_or_init(|| {
+                        let mut map = BTreeMap::new();
+                        for (idx, schema) in schemas.iter().enumerate() {
+                            map.insert(schema.name.clone(), idx);
+                        }
+                        map
+                    });
+                    Ok(schemas.as_slice())
+                }
                 Err(err) => Err(ncf_core::NcfError::Header(err.clone())),
             }
         })
@@ -476,5 +503,165 @@ impl NcfReader {
             result.extend_from_slice(&decompressed);
         }
         Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use ncf_core::header::Metadata;
+    use ncf_core::schema::{DType, Encoding, Layout, Compression};
+    use crate::writer::NcfWriter;
+
+    #[test]
+    fn test_find_schema_with_1000_tensors_uses_fast_lookup() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("test_1000_tensors.ncf");
+
+        // Create 1000 tensors using NcfWriter
+        let metadata = NcfHeader {
+            metadata: Metadata {
+                model_name: "test_model".into(),
+                architecture: "test_arch".into(),
+                created_at: 0,
+                author: None,
+                license: None,
+                quantization: None,
+                custom: Default::default(),
+            }
+        };
+
+        let mut writer = NcfWriter::new(metadata, ncf_core::header::NcfFlags::empty());
+
+        // Add 1000 unique tensors
+        let num_tensors = 1000;
+        let test_names: Vec<String> = (0..num_tensors)
+            .map(|i| format!("tensor_{:04}", i))
+            .collect();
+
+        for (_i, name) in test_names.iter().enumerate() {
+            let schema = TensorSchema {
+                name: name.clone(),
+                dtype: DType::F32,
+                shape: vec![64],
+                column_layout: Layout::RowMajor,
+                compression: Compression::None,
+                encoding: Encoding::Plain,
+                chunks: vec![],
+            };
+            let payload = vec![0u8; 256]; // 64 * 4 bytes
+            writer.add_tensor(schema, payload);
+        }
+
+        writer.finalize(&path).expect("Failed to write NCF file");
+
+        // Now read back and test find_schema performance
+        let reader = NcfReader::open(&path).expect("Failed to open NCF file");
+
+        // Verify we have the correct number of tensors
+        assert_eq!(reader.schema_count().unwrap(), num_tensors);
+
+        // Test that all tensors can be found correctly using find_schema()
+        for (_i, name) in test_names.iter().enumerate() {
+            let found = reader.find_schema(name)
+                .expect("Failed to find schema")
+                .expect("Schema not found");
+            
+            assert_eq!(found.name, *name);
+            assert_eq!(found.shape, vec![64]);
+        }
+
+        // Test that non-existent tensors return None
+        assert!(reader.find_schema("nonexistent_tensor")
+            .expect("Failed to query non-existent tensor")
+            .is_none());
+
+        // Verify schema_map was created and populated correctly
+        let dependent = reader.borrow_dependent();
+        assert!(dependent.schema_map.get().is_some(), "schema_map should be populated");
+        
+        let schema_map = dependent.schema_map.get().unwrap();
+        assert_eq!(schema_map.len(), num_tensors, "schema_map should have all {} tensors", num_tensors);
+
+        // Verify that schema_map indexing is correct
+        for (i, name) in test_names.iter().enumerate() {
+            let idx = schema_map.get(name)
+                .expect(&format!("tensor {} should be in schema_map", name));
+            assert_eq!(*idx, i, "schema_map index mismatch for {}", name);
+        }
+
+        // Verify schemas are still accessible and match
+        let schemas = reader.schemas().expect("Failed to get schemas");
+        assert_eq!(schemas.len(), num_tensors);
+        for (i, schema) in schemas.iter().enumerate() {
+            assert_eq!(schema.name, test_names[i]);
+        }
+    }
+
+    #[test]
+    fn test_find_schema_correctness_with_large_names() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("test_large_names.ncf");
+
+        let metadata = NcfHeader {
+            metadata: Metadata {
+                model_name: "test".into(),
+                architecture: "test".into(),
+                created_at: 0,
+                author: None,
+                license: None,
+                quantization: None,
+                custom: Default::default(),
+            }
+        };
+
+        let mut writer = NcfWriter::new(metadata, ncf_core::header::NcfFlags::empty());
+
+        // Create tensors with various name patterns to test BTreeMap ordering
+        let test_names = vec![
+            "zzz_tensor",
+            "aaa_tensor",
+            "mmm_tensor",
+            "bbb_tensor",
+        ];
+
+        for name in &test_names {
+            let schema = TensorSchema {
+                name: name.to_string(),
+                dtype: DType::F32,
+                shape: vec![32],
+                column_layout: Layout::RowMajor,
+                compression: Compression::None,
+                encoding: Encoding::Plain,
+                chunks: vec![],
+            };
+            let payload = vec![0u8; 128];
+            writer.add_tensor(schema, payload);
+        }
+
+        writer.finalize(&path).expect("Failed to write NCF file");
+
+        let reader = NcfReader::open(&path).expect("Failed to open NCF file");
+
+        // Verify all tensors can be found regardless of insertion order
+        for name in &test_names {
+            let found = reader.find_schema(name)
+                .expect("Failed to find schema")
+                .expect("Schema not found");
+            assert_eq!(&found.name, name);
+        }
+
+        // Verify schema_map maintains order
+        let dependent = reader.borrow_dependent();
+        let schema_map = dependent.schema_map.get().unwrap();
+        
+        let map_keys: Vec<_> = schema_map.keys().collect();
+        let mut sorted_names = test_names.to_vec();
+        sorted_names.sort();
+        
+        for (i, name) in sorted_names.iter().enumerate() {
+            assert_eq!(map_keys[i], name, "schema_map should maintain sorted order");
+        }
     }
 }

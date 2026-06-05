@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use reqwest::header::RANGE;
+use reqwest::header::{RANGE, ACCEPT_RANGES, CONTENT_RANGE};
 use reqwest::Client;
 use std::convert::TryInto;
 use std::io::{Cursor, Read};
@@ -24,14 +24,49 @@ pub struct NcfHttpReader {
     metadata: NcfHeader,
     schemas: Vec<TensorSchema>,
     index: NcfIndex,
+    supports_range_requests: bool,
 }
 
 impl NcfHttpReader {
-    /// Open a remote NCF file using two range requests.
+    /// Open a remote NCF file using 3-step architecture with efficient range requests.
+    /// 
+    /// Step 1: Fetch 48-byte prefix to get schema_offset and index_offset
+    /// Step 2: Fetch header + schema blocks (from byte 48 to index_offset-16)
+    /// Step 3: Fetch footer (last 16 bytes) to get index length, then fetch index block
     pub async fn open(url: &str) -> Result<Self> {
         let client = Client::new();
 
-        // 1) fetch prefix
+        // Determine file size and validate range request support with HEAD request
+        let head_resp = client
+            .head(url)
+            .send()
+            .await
+            .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        let file_size = head_resp
+            .content_length()
+            .ok_or_else(|| ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Server did not provide Content-Length header",
+            )))?;
+
+        // Check if server supports range requests
+        let supports_range = head_resp
+            .headers()
+            .get(ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v != "none")
+            .unwrap_or(false);
+
+        if !supports_range {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "HTTP server does not support range requests (Accept-Ranges: none). \
+                Cannot efficiently fetch NCF file. Server must support Range headers.",
+            )));
+        }
+
+        // STEP 1: Fetch 48-byte prefix to get schema_offset and index_offset
         let prefix_bytes = client
             .get(url)
             .header(RANGE, "bytes=0-47")
@@ -41,11 +76,53 @@ impl NcfHttpReader {
             .bytes()
             .await
             .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        if prefix_bytes.len() != 48 {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Expected 48 bytes for prefix, got {}", prefix_bytes.len()),
+            )));
+        }
+
         let prefix = FileHeaderPrefix::decode(&prefix_bytes)?;
 
-        // 2) fetch rest of file from byte 48 to end
-        let range_header = format!("bytes={}-", FILE_HEADER_PREFIX_SIZE);
-        let body = client
+        // Validate offsets
+        if prefix.schema_offset < FILE_HEADER_PREFIX_SIZE {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid schema_offset: {} (must be >= {})",
+                    prefix.schema_offset, FILE_HEADER_PREFIX_SIZE
+                ),
+            )));
+        }
+
+        if prefix.index_offset < prefix.schema_offset {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid index_offset: {} (must be >= schema_offset: {})",
+                    prefix.index_offset, prefix.schema_offset
+                ),
+            )));
+        }
+
+        if prefix.index_offset >= file_size || file_size < 16 {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid offsets: index_offset={}, file_size={}, file must be at least 16 bytes for footer",
+                    prefix.index_offset, file_size
+                ),
+            )));
+        }
+
+        // STEP 2: Fetch header + schema blocks (from byte 48 to index_offset-16)
+        // index_offset points to start of index, and we need to stop before footer (last 16 bytes)
+        let header_schema_end = prefix.index_offset;
+        let range_header = format!("bytes=48-{}", header_schema_end - 1);
+
+        let header_schema_bytes = client
             .get(url)
             .header(RANGE, range_header)
             .send()
@@ -55,35 +132,103 @@ impl NcfHttpReader {
             .await
             .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-        let file_size = (FILE_HEADER_PREFIX_SIZE as u64)
-            .checked_add(body.len() as u64)
-            .ok_or_else(|| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, "file size overflow")))?;
-
+        // Decode header from the fetched block
         let header_len = prefix.header_len as usize;
-        if body.len() < header_len {
-            return Err(ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "body too small for header")));
+        if header_schema_bytes.len() < header_len {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Header block too small: got {}, expected at least {}", 
+                    header_schema_bytes.len(), header_len),
+            )));
         }
 
-        let metadata = NcfHeader::decode_cbor(&body[..header_len])?;
+        let metadata = NcfHeader::decode_cbor(&header_schema_bytes[..header_len])?;
 
-        let schema_rel_start = (prefix.schema_offset as usize).saturating_sub(FILE_HEADER_PREFIX_SIZE as usize);
-        let schema_rel_end = (prefix.index_offset as usize).saturating_sub(FILE_HEADER_PREFIX_SIZE as usize);
-        let schema_bytes = &body[schema_rel_start..schema_rel_end];
+        // Extract schema block
+        let schema_rel_start = (prefix.schema_offset as usize).saturating_sub(48);
+        let schema_rel_end = (prefix.index_offset as usize).saturating_sub(48);
+
+        if schema_rel_end > header_schema_bytes.len() {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Schema block out of range: [{}, {}] in buffer of size {}",
+                    schema_rel_start, schema_rel_end, header_schema_bytes.len()),
+            )));
+        }
+
+        let schema_bytes = &header_schema_bytes[schema_rel_start..schema_rel_end];
         let schemas: Vec<TensorSchema> = from_reader(Cursor::new(schema_bytes))?;
 
-        let footer_pos = body.len().checked_sub(16).ok_or_else(|| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "file too small for footer")))?;
-        let footer_magic = &body[footer_pos..footer_pos + 8];
-        if footer_magic != b"NCFEND!!" {
-            return Err(ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid footer magic")));
+        // STEP 3: Fetch footer (last 16 bytes) to get index length
+        let footer_start = file_size - 16;
+        let range_header = format!("bytes={}-{}", footer_start, file_size - 1);
+
+        let footer_bytes = client
+            .get(url)
+            .header(RANGE, range_header)
+            .send()
+            .await
+            .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .bytes()
+            .await
+            .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        if footer_bytes.len() != 16 {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Expected 16 bytes for footer, got {}", footer_bytes.len()),
+            )));
         }
 
-        let footer_len_bytes: [u8; 8] = body[footer_pos + 8..footer_pos + 16]
+        let footer_magic = &footer_bytes[0..8];
+        if footer_magic != b"NCFEND!!" {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid footer magic: expected b'NCFEND!!', got {:?}", 
+                    String::from_utf8_lossy(footer_magic)),
+            )));
+        }
+
+        let footer_len_bytes: [u8; 8] = footer_bytes[8..16]
             .try_into()
-            .map_err(|_| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid footer len")))?;
+            .map_err(|_| ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Failed to parse footer length",
+            )))?;
         let index_len = u64::from_le_bytes(footer_len_bytes) as usize;
 
-        let index_rel_start = (prefix.index_offset as usize).saturating_sub(FILE_HEADER_PREFIX_SIZE as usize);
-        let index_bytes = &body[index_rel_start..index_rel_start + index_len];
+        // Validate index length
+        if (prefix.index_offset as usize) + index_len + 16 > file_size as usize {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Index block overflow: index_offset={}, index_len={}, file_size={}, with 16-byte footer",
+                    prefix.index_offset, index_len, file_size
+                ),
+            )));
+        }
+
+        // STEP 3 (continued): Fetch index block
+        let index_end = prefix.index_offset + (index_len as u64);
+        let range_header = format!("bytes={}-{}", prefix.index_offset, index_end - 1);
+
+        let index_bytes = client
+            .get(url)
+            .header(RANGE, range_header)
+            .send()
+            .await
+            .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .bytes()
+            .await
+            .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        if index_bytes.len() != index_len {
+            return Err(ncf_core::NcfError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Index block size mismatch: expected {}, got {}", index_len, index_bytes.len()),
+            )));
+        }
+
         let index: NcfIndex = from_reader(Cursor::new(index_bytes))?;
 
         Ok(Self {
@@ -94,6 +239,7 @@ impl NcfHttpReader {
             metadata,
             schemas,
             index,
+            supports_range_requests: true,
         })
     }
 
@@ -120,6 +266,11 @@ impl NcfHttpReader {
     /// Parsed index block for the remote NCF file.
     pub fn index(&self) -> &NcfIndex {
         &self.index
+    }
+
+    /// Whether the HTTP server supports range requests.
+    pub fn supports_range_requests(&self) -> bool {
+        self.supports_range_requests
     }
 
     async fn fetch_chunk(&self, chunk_ref: ChunkRef) -> Result<Bytes> {
@@ -166,26 +317,93 @@ async fn fetch_chunk_bytes(client: &Client, url: &str, chunk_ref: ChunkRef) -> R
     let end = chunk_ref
         .byte_offset
         .checked_add(chunk_ref.byte_len)
-        .ok_or_else(|| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk range overflow")))?;
+        .ok_or_else(|| ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "chunk range overflow",
+        )))?;
+
+    // Validate chunk bounds
+    if start >= end {
+        return Err(ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid chunk range: start={} >= end={}", start, end),
+        )));
+    }
+
+    // HTTP Range header format: bytes=start-end (inclusive)
     let range_header = format!("bytes={}-{}", start, end - 1);
 
-    let bytes = client
+    let response = client
         .get(url)
-        .header(RANGE, range_header)
+        .header(RANGE, &range_header)
         .send()
         .await
-        .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to fetch chunk range {}: {}", range_header, e),
+        )))?;
+
+    // Validate response status
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "HTTP request for chunk {} failed with status {}: {}",
+                range_header,
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            ),
+        )));
+    }
+
+    // Check if server supports range requests (should respond with 206 Partial Content)
+    if status.as_u16() != 206 && status.as_u16() != 200 {
+        return Err(ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "Unexpected status code {} for range request. Server may not support range requests.",
+                status.as_u16()
+            ),
+        )));
+    }
+
+    let bytes = response
         .bytes()
         .await
-        .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to read response body for chunk {}: {}", range_header, e),
+        )))?;
+
+    // Validate response size
+    let expected_size = (end - start) as usize;
+    if bytes.len() != expected_size {
+        return Err(ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Chunk size mismatch for range {}: expected {}, got {}",
+                range_header,
+                expected_size,
+                bytes.len()
+            ),
+        )));
+    }
 
     let mut cursor = Cursor::new(&bytes);
     let mut header_buf = [0u8; CHUNK_HEADER_SIZE as usize];
-    cursor.read_exact(&mut header_buf).map_err(|e| ncf_core::NcfError::Io(e))?;
+    cursor.read_exact(&mut header_buf).map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("Failed to read chunk header from range {}: {}", range_header, e),
+    )))?;
+
     let chunk_header = ChunkHeader::decode(&header_buf)?;
 
     let mut payload = vec![0u8; chunk_header.compressed_len as usize];
-    cursor.read_exact(&mut payload).map_err(|e| ncf_core::NcfError::Io(e))?;
+    cursor.read_exact(&mut payload).map_err(|e| ncf_core::NcfError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("Failed to read chunk payload from range {}: {}", range_header, e),
+    )))?;
 
     let decompressed = if chunk_header.flags == 0 {
         payload
@@ -201,7 +419,15 @@ async fn fetch_chunk_bytes(client: &Client, url: &str, chunk_ref: ChunkRef) -> R
 
     let computed = blake3::hash(&decompressed);
     if computed.as_bytes() != &chunk_ref.checksum {
-        return Err(ncf_core::NcfError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "checksum mismatch")));
+        return Err(ncf_core::NcfError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Checksum mismatch for chunk at range {}: expected {:x?}, got {:x?}",
+                range_header,
+                chunk_ref.checksum,
+                computed.as_bytes()
+            ),
+        )));
     }
 
     Ok(Bytes::from(decompressed))
